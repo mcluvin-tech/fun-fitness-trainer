@@ -22,3 +22,6 @@ supabase/.env.local
 
 # Setup
 .DS_Store
+
+# Supabase CLI local state
+supabase/.temp/

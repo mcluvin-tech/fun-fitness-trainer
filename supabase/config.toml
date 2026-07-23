@@ -1,0 +1,30 @@
+project_id = "oidzizeeveglgqsmowaz"
+
+[api]
+enabled = true
+port = 54321
+schemas = ["public"]
+extra_search_path = ["public", "extensions"]
+max_rows = 1000
+
+[db]
+port = 54322
+major_version = 17
+
+[studio]
+enabled = true
+port = 54323
+
+[auth]
+enabled = true
+site_url = "funfitnesstrainer://auth-callback"
+additional_redirect_urls = ["funfitnesstrainer://auth-callback"]
+
+[auth.external.google]
+enabled = false
+
+[functions.analyze-food]
+verify_jwt = false
+
+[functions.trainer-chat]
+verify_jwt = false

@@ -28,6 +28,7 @@ struct DashboardView: View {
     @State private var showThePack = false
     @State private var showLogExercise = false
     @State private var pendingLogFoodAction: PendingLogFoodAction?
+    @State private var isHomeMenuExpanded = false
     private var todayMeals: [Meal] {
         DaySummaryService.mealsToday(from: allMeals)
     }
@@ -90,7 +91,7 @@ struct DashboardView: View {
 
     var body: some View {
         NavigationStack {
-            ZStack {
+            ZStack(alignment: .bottom) {
                 HomeDarkBackground()
 
                 VStack(spacing: 0) {
@@ -111,9 +112,22 @@ struct DashboardView: View {
 
                     Spacer(minLength: todayLogItems.isEmpty ? 12 : 0)
 
-                    homeActionBar
+                    // Reserve space so content doesn't sit under the dock.
+                    Color.clear.frame(height: 108)
                 }
+
+                if isHomeMenuExpanded {
+                    Color.black.opacity(0.4)
+                        .ignoresSafeArea()
+                        .onTapGesture { collapseHomeMenu() }
+                        .transition(.opacity)
+                        .accessibilityLabel("Dismiss menu")
+                        .accessibilityAddTraits(.isButton)
+                }
+
+                homeActionBar
             }
+            .animation(.spring(response: 0.42, dampingFraction: 0.78), value: isHomeMenuExpanded)
             .preferredColorScheme(.dark)
             .toolbar(.hidden, for: .navigationBar)
             .task { normalizeTodayMeals() }
@@ -127,6 +141,18 @@ struct DashboardView: View {
             }
             .onReceive(NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)) { _ in
                 applyRandomGreeting()
+            }
+            .onChange(of: showLarryChat) { _, open in
+                if open { collapseHomeMenu() }
+            }
+            .onChange(of: showCamera) { _, open in
+                if open { collapseHomeMenu() }
+            }
+            .onChange(of: showLogFood) { _, open in
+                if open { collapseHomeMenu() }
+            }
+            .onChange(of: showThePack) { _, open in
+                if open { collapseHomeMenu() }
             }
             .sheet(isPresented: $showLarryChat) {
                 CoachChatView()
@@ -365,24 +391,48 @@ struct DashboardView: View {
         .frame(maxHeight: todayLogItems.isEmpty ? 96 : nil)
     }
 
-    // MARK: - Bottom actions: Log food · Larry · The Pack
+    // MARK: - Bottom actions: Capture · Voice · Community (pop-out)
 
     private var homeActionBar: some View {
-        HStack(alignment: .bottom, spacing: 0) {
-            Button {
+        homePopOutMenu
+            .padding(.horizontal, 28)
+            .padding(.top, 14)
+            .padding(.bottom, 8)
+            .safeAreaPadding(.bottom, 4)
+            .frame(maxWidth: .infinity)
+            .background {
+                HomeDockBackground()
+                    .overlay(alignment: .top) {
+                        Rectangle()
+                            .fill(
+                                LinearGradient(
+                                    colors: [BrandTheme.purple.opacity(0.55), BrandTheme.teal.opacity(0.35)],
+                                    startPoint: .leading,
+                                    endPoint: .trailing
+                                )
+                            )
+                            .frame(height: 1)
+                    }
+            }
+    }
+
+    /// Closed: solid origin dot. Open: Capture · Voice · Community fan out horizontally.
+    private var homePopOutMenu: some View {
+        ZStack {
+            homeMenuAction(
+                systemImage: "camera.fill",
+                label: "Capture",
+                tint: Color.brandAccent,
+                accessibilityLabel: "Capture food",
+                xOffset: isHomeMenuExpanded ? -110 : 0,
+                appearDelay: 0.02
+            ) {
                 if appState.canScanFood && RuntimeEnvironment.isCameraAvailable {
                     showCamera = true
                 } else {
                     showLogFood = true
                 }
-            } label: {
-                HomeActionButton(
-                    systemImage: "camera.fill",
-                    label: "Log food",
-                    tint: Color.brandAccent
-                )
             }
-            .accessibilityLabel("Log food")
             .contextMenu {
                 Button {
                     showLogFood = true
@@ -391,49 +441,103 @@ struct DashboardView: View {
                 }
             }
 
-            Spacer(minLength: 8)
-
-            Button {
+            homeMenuAction(
+                systemImage: "mic.fill",
+                label: "Voice",
+                tint: BrandTheme.purple,
+                accessibilityLabel: "Voice — talk to Larry",
+                xOffset: 0,
+                appearDelay: 0
+            ) {
                 showLarryChat = true
-            } label: {
-                HomeActionButton(
-                    systemImage: "mic.fill",
-                    label: "Larry",
-                    tint: BrandTheme.purple
-                )
             }
-            .accessibilityLabel("Talk to Larry")
 
-            Spacer(minLength: 8)
-
-            Button {
+            homeMenuAction(
+                systemImage: "person.3.fill",
+                label: "Community",
+                tint: BrandTheme.teal,
+                accessibilityLabel: "Community — The Pack feed",
+                xOffset: isHomeMenuExpanded ? 110 : 0,
+                appearDelay: 0.04
+            ) {
                 showThePack = true
-            } label: {
-                HomeActionButton(
-                    systemImage: "person.3.fill",
-                    label: "The pack",
-                    tint: BrandTheme.teal
-                )
             }
-            .accessibilityLabel("The pack community feed")
-        }
-        .padding(.horizontal, 28)
-        .padding(.top, 14)
-        .padding(.bottom, 8)
-        .safeAreaPadding(.bottom, 4)
-        .background {
-            HomeDockBackground()
-                .overlay(alignment: .top) {
-                    Rectangle()
-                        .fill(
-                            LinearGradient(
-                                colors: [BrandTheme.purple.opacity(0.55), BrandTheme.teal.opacity(0.35)],
-                                startPoint: .leading,
-                                endPoint: .trailing
-                            )
-                        )
-                        .frame(height: 1)
+
+            // Origin hub — solid black dot when closed (sketch label 1).
+            Button {
+                toggleHomeMenu()
+            } label: {
+                ZStack {
+                    Circle()
+                        .fill(Color(red: 0.05, green: 0.03, blue: 0.09))
+                        .frame(width: 64, height: 64)
+                        .overlay {
+                            Circle()
+                                .strokeBorder(
+                                    LinearGradient(
+                                        colors: [BrandTheme.magenta.opacity(0.75), BrandTheme.purple.opacity(0.55)],
+                                        startPoint: .topLeading,
+                                        endPoint: .bottomTrailing
+                                    ),
+                                    lineWidth: 2
+                                )
+                        }
+                        .shadow(color: BrandTheme.magenta.opacity(0.4), radius: 12, y: 2)
+
+                    Circle()
+                        .fill(Color.white.opacity(0.12))
+                        .frame(width: 18, height: 18)
                 }
+                .frame(width: 64, height: 86, alignment: .top)
+            }
+            .buttonStyle(.plain)
+            .opacity(isHomeMenuExpanded ? 0 : 1)
+            .scaleEffect(isHomeMenuExpanded ? 0.35 : 1)
+            .allowsHitTesting(!isHomeMenuExpanded)
+            .accessibilityLabel("Open Capture, Voice, and Community")
+            .accessibilityHint("Expands actions for Capture, Voice, and Community")
+            .accessibilityHidden(isHomeMenuExpanded)
+            .zIndex(2)
+        }
+        .frame(height: 86)
+    }
+
+    private func homeMenuAction(
+        systemImage: String,
+        label: String,
+        tint: Color,
+        accessibilityLabel: String,
+        xOffset: CGFloat,
+        appearDelay: Double,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HomeActionButton(systemImage: systemImage, label: label, tint: tint)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(accessibilityLabel)
+        .offset(x: xOffset)
+        .opacity(isHomeMenuExpanded ? 1 : 0)
+        .scaleEffect(isHomeMenuExpanded ? 1 : 0.2)
+        .animation(
+            .spring(response: 0.42, dampingFraction: 0.78).delay(isHomeMenuExpanded ? appearDelay : 0),
+            value: isHomeMenuExpanded
+        )
+        .allowsHitTesting(isHomeMenuExpanded)
+        .accessibilityHidden(!isHomeMenuExpanded)
+        .zIndex(1)
+    }
+
+    private func toggleHomeMenu() {
+        withAnimation(.spring(response: 0.42, dampingFraction: 0.78)) {
+            isHomeMenuExpanded.toggle()
+        }
+    }
+
+    private func collapseHomeMenu() {
+        guard isHomeMenuExpanded else { return }
+        withAnimation(.spring(response: 0.36, dampingFraction: 0.86)) {
+            isHomeMenuExpanded = false
         }
     }
 

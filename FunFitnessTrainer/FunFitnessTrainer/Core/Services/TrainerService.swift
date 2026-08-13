@@ -281,7 +281,15 @@ enum TrainerService {
         }
 
         if looksLikeFoodConfirmation(text) {
-            let raw = foodDescriptionFromContext(messages) ?? lastUser
+            guard let raw = foodDescriptionFromContext(messages) else {
+                return TrainerChatResponse(
+                    reply: "Log what? Tell me the food and I'll put it in the log.",
+                    replies: nil,
+                    suggested_goal: goal,
+                    suggested_meal: nil,
+                    suggested_exercise: nil
+                )
+            }
             let source = FoodItemNaming.loggedFoodDescription(from: raw) ?? raw
             suggestedMeal = FoodAnalysisService.estimateOffline(from: source)
             return TrainerChatResponse(
@@ -376,9 +384,30 @@ enum TrainerService {
         let triggers = [
             "i had ", "i ate ", "i drank ", "i've had ", "ive had ", "i've drank ", "ive drank ",
             "just ate", "just had", "just drank", "already ate", "already had", "already drank",
-            "log my ", "log this meal", "log this food", "log this drink", "add it to my log",
+            "log my ", "log this meal", "log this food", "log this drink",
+            "add it to my log", "add to my log", "add to log",
+            "please log ", "please add ",
         ]
-        return triggers.contains { text.contains($0) }
+        if triggers.contains(where: { text.contains($0) }) { return true }
+        // Typed chat: "log avocado and eggs", "log an avocado", "add eggs and toast"
+        return looksLikeImperativeFoodLog(text)
+    }
+
+    /// "log [food…]" / "add [food…]" without past tense — common when typing, rare in voice STT.
+    private static func looksLikeImperativeFoodLog(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let prefixes = ["log ", "add "]
+        for prefix in prefixes where trimmed.hasPrefix(prefix) {
+            let rest = String(trimmed.dropFirst(prefix.count))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard rest.count >= 2 else { return false }
+            // Avoid treating confirmations as imperative food logs ("log it", "add it", "log this").
+            if looksLikeFoodConfirmation(trimmed) { return false }
+            let confirmationOnly = ["it", "that", "them", "those", "this"]
+            if confirmationOnly.contains(rest) { return false }
+            return true
+        }
+        return false
     }
 
     /// When Larry omits MEAL_JSON but the user already ate/drank something, log locally.
@@ -455,6 +484,8 @@ enum TrainerService {
             "big mac", "bigmac", "burger", "mcdonald", "pizza", "fries",
             "egg", "chicken", "salmon", "fish", "yogurt", "toast", "bread",
             "rice", "salad", "twix", "candy", "donut", "doughnut",
+            "avocado", "carrot", "ground beef", "almond butter", "peanut butter",
+            "latte", "coffee", "smoothie", "protein shake",
         ]
         return foods.contains { text.contains($0) }
     }
@@ -465,7 +496,12 @@ enum TrainerService {
             "go ahead and log", "go ahead log", "i'm logging", "im logging",
             "add it", "count it", "yes add", "yeah add", "log them", "log those",
         ]
-        return triggers.contains { text.contains($0) }
+        if triggers.contains(where: { text.contains($0) }) { return true }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Bare confirmations with no food words — pull the meal from earlier chat.
+        return trimmed == "log this" || trimmed == "add this"
+            || trimmed == "yes" || trimmed == "yeah" || trimmed == "yep"
+            || trimmed == "go ahead" || trimmed == "do it"
     }
 
     private static func looksLikeDailyMacroStatusQuestion(_ text: String) -> Bool {
@@ -488,8 +524,30 @@ enum TrainerService {
                 }
                 return msg.content
             }
+            // Typed preview → "log it": prior message is often a bare food list or macro question,
+            // which neither past-tense nor confirmation detectors catch.
+            if looksLikeFoodMacroQuery(text) || looksLikeBareFoodDescription(text) {
+                if let ref = FoodItemNaming.extractFoodReference(from: msg.content) {
+                    return ref
+                }
+                let sanitized = FoodItemNaming.sanitizeSegment(msg.content)
+                return sanitized.isEmpty ? msg.content : sanitized
+            }
         }
         return nil
+    }
+
+    /// Short typed food lists like "avocado and eggs" (no question, no past tense).
+    private static func looksLikeBareFoodDescription(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed.count <= 80 else { return false }
+        if trimmed.contains("?") { return false }
+        if looksLikeHypotheticalFood(trimmed) || looksLikeConfirmedFoodLog(trimmed) { return false }
+        if looksLikeFoodConfirmation(trimmed) || looksLikeDailyMacroStatusQuestion(trimmed) { return false }
+        if looksLikeExerciseLog(trimmed) { return false }
+        // Prefer multi-item lists or known foods so random chat isn't treated as a meal.
+        if trimmed.contains(" and ") || trimmed.contains(",") { return true }
+        return mentionsKnownFood(trimmed)
     }
 
     private static func offlineLogReply(for meal: MealPayload) -> String {

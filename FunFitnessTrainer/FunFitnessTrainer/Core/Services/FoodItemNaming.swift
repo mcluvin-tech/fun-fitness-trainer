@@ -12,6 +12,10 @@ enum FoodItemNaming {
         "i had ", "i ate ", "i drank ", "i've had ", "ive had ", "i've drank ", "ive drank ",
         "i just had ", "i just ate ", "i just drank ", "just had ", "just ate ", "just drank ",
         "already had ", "already ate ", "already drank ",
+        // Typed chat often uses imperative logging: "log avocado and eggs"
+        "log an ", "log a ", "log my ", "log this ", "log the ", "log some ", "log ",
+        "add an ", "add a ", "add my ", "add this ", "add the ", "add some ",
+        "please log ", "please add ",
     ]
 
     private static let segmentPrefixes = consumptionTriggers + [

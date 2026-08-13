@@ -409,11 +409,15 @@ struct CoachChatView: View {
         guard let payload else { return }
         // Insert immediately so Today's log and macro rings update cumulatively.
         let inserted = MealLogging.insertReturningMeals(payload, into: context)
+        let expectedCount = max(inserted.count, payload.entriesForLogging().count)
 
         let source = latestFoodLogDescription() ?? payload.name
         Task {
             let resolved = await FoodAnalysisService.resolveMealForLogging(from: source)
             guard resolved.isLabelBacked else { return }
+            // Never collapse a multi-item log into fewer rows (e.g. OFF matching only "avocado").
+            let resolvedCount = resolved.entriesForLogging().count
+            guard resolvedCount >= expectedCount || expectedCount <= 1 else { return }
             await MainActor.run {
                 MealLogging.replace(meals: inserted, with: resolved, in: context)
             }

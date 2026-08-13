@@ -49,14 +49,78 @@ enum FoodAnalysisService {
     }
 
     /// Voice/text logging: try Open Food Facts (short timeout), then offline rules. Runs off the chat hot path.
+    /// Multi-food descriptions resolve each item separately so one product match can't wipe the rest.
     static func resolveMealForLogging(from description: String) async -> MealPayload {
         let query = description.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else { return estimateOffline(from: description) }
 
+        let offline = estimateOffline(from: description)
+        let entries = offline.entriesForLogging()
+
+        if entries.count > 1 {
+            return await resolveMultiItemMeal(entries: entries, fallback: offline)
+        }
+
         if let product = try? await OpenFoodFactsService.searchBestMatch(query: query) {
             return mealPayload(from: product, userDescription: description)
         }
-        return estimateOffline(from: description)
+        return offline
+    }
+
+    /// Enrich each line item on its own; keep offline estimates when no label match.
+    private static func resolveMultiItemMeal(
+        entries: [MealPayload],
+        fallback: MealPayload
+    ) async -> MealPayload {
+        var lineItems: [MealLineItem] = []
+        var anyLabelBacked = false
+        var assumptions: [String] = fallback.assumptions
+
+        for entry in entries {
+            if let product = try? await OpenFoodFactsService.searchBestMatch(query: entry.name) {
+                let labeled = mealPayload(from: product, userDescription: entry.name)
+                anyLabelBacked = true
+                assumptions.append(contentsOf: labeled.assumptions)
+                lineItems.append(
+                    MealLineItem(
+                        name: labeled.name,
+                        calories: labeled.calories,
+                        proteinG: labeled.proteinG,
+                        carbsG: labeled.carbsG,
+                        fatG: labeled.fatG
+                    )
+                )
+            } else {
+                lineItems.append(
+                    MealLineItem(
+                        name: entry.name,
+                        calories: entry.calories,
+                        proteinG: entry.proteinG,
+                        carbsG: entry.carbsG,
+                        fatG: entry.fatG
+                    )
+                )
+            }
+        }
+
+        guard anyLabelBacked else { return fallback }
+
+        let totals = lineItems.reduce(into: MacroTotals()) { acc, item in
+            acc.calories += item.calories
+            acc.proteinG += item.proteinG
+            acc.carbsG += item.carbsG
+            acc.fatG += item.fatG
+        }
+        return MealPayload(
+            name: "Meal",
+            calories: totals.calories,
+            proteinG: totals.proteinG,
+            carbsG: totals.carbsG,
+            fatG: totals.fatG,
+            lineItems: lineItems,
+            isLabelBacked: true,
+            assumptions: assumptions
+        )
     }
 
     static func mealPayload(from product: BarcodeProductResult, userDescription: String) -> MealPayload {

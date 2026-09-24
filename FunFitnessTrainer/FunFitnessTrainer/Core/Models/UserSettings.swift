@@ -87,7 +87,14 @@ final class UserSettings {
         goalWeightKg ?? weightKg
     }
 
+    /// Weekly pace is the source of truth after setup. A gains plan can be a surplus
+    /// even when the scale goal is still close to today's weight.
     var resolvedGoalType: GoalType {
+        if let weekly = weeklyLbChangeTarget {
+            if weekly >= 0.2 { return .gain }
+            if weekly <= -0.2 { return .lose }
+            return .maintain
+        }
         let diff = effectiveGoalWeightKg - weightKg
         if diff < -0.5 { return .lose }
         if diff > 0.5 { return .gain }

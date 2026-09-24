@@ -27,4 +27,4 @@ OPENAI_API_KEY=sk-...
 | Function | Purpose |
 |----------|---------|
 | `analyze-food` | Vision macro estimate (gpt-4o) |
-| `trainer-chat` | Morning ritual + dashboard reactions |
+| `trainer-chat` | Larry chat, including diet / gains guidance (prompt version 17). Redeploy after prompt edits. |

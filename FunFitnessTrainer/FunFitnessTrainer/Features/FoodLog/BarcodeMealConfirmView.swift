@@ -78,7 +78,9 @@ struct BarcodeMealConfirmView: View {
                     }
 
                     Section {
-                        Text("Data from Open Food Facts. Confirm before saving.")
+                        Text(product.nutritionIsComplete
+                             ? "Data from Open Food Facts. Confirm the serving, then save."
+                             : "Open Food Facts has this product but no label calories. Saving logs zeros — edit them after if you know the label.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -151,7 +153,13 @@ struct BarcodeMealConfirmView: View {
             barcode: product.barcode
         )
         context.insert(meal)
-        try? context.save()
+        do {
+            try context.save()
+        } catch {
+            context.delete(meal)
+            errorMessage = "Couldn't save this meal. Try again."
+            return
+        }
         MealLogging.shareToPack(meal: meal)
         onSaved?()
         dismiss()

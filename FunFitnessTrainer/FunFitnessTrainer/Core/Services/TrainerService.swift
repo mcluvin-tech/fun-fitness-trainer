@@ -136,7 +136,8 @@ enum TrainerService {
                     goal: goal,
                     remaining: remaining,
                     phrases: phrases,
-                    weightKg: weightKg
+                    weightKg: weightKg,
+                    goalType: goalType
                 ),
                 messages: messages
             )
@@ -155,6 +156,15 @@ enum TrainerService {
         exerciseCaloriesBurned: Double = 0,
         weightKg: Double = 75
     ) async throws -> TrainerChatResponse {
+        if let dietReply = dietReplyIfNeeded(
+            messages: messages,
+            goalType: goalType,
+            goal: goal,
+            weightKg: weightKg
+        ) {
+            return dietReply
+        }
+
         guard AppConfig.hasBackend else {
             return offlineResponse(
                 mode: mode,
@@ -163,7 +173,8 @@ enum TrainerService {
                 goal: goal,
                 remaining: remaining,
                 phrases: phrases,
-                weightKg: weightKg
+                weightKg: weightKg,
+                goalType: goalType
             )
         }
 
@@ -263,7 +274,8 @@ enum TrainerService {
         goal: MacroGoalPayload?,
         remaining: MacroTotals?,
         phrases: [String],
-        weightKg: Double = 75
+        weightKg: Double = 75,
+        goalType: String? = nil
     ) -> TrainerChatResponse {
         let lastUser = messages.last(where: { $0.role == "user" })?.content ?? ""
         let text = lastUser.lowercased()
@@ -342,7 +354,7 @@ enum TrainerService {
         }
 
         if looksLikeMealSuggestion(text), let goal, let remaining {
-            let reply = leanMealSuggestions(remaining: remaining, goal: goal)
+            let reply = leanMealSuggestions(remaining: remaining, goal: goal, goalType: goalType)
             return TrainerChatResponse(reply: reply, replies: nil, suggested_goal: goal, suggested_meal: nil, suggested_exercise: nil)
         }
 
@@ -353,6 +365,80 @@ enum TrainerService {
             suggested_meal: nil,
             suggested_exercise: nil
         )
+    }
+
+    /// Locks a gains surplus when the user asks. Questions are answered in `dietReplyIfNeeded`.
+    static func isGainsDietSetupCommand(_ text: String) -> Bool {
+        let lower = text.lowercased()
+        let phrases = [
+            "set my plan for gains",
+            "set my diet for gains",
+            "set up a gains diet",
+            "set up my diet for gains",
+            "switch to gains",
+            "switch me to gains",
+            "use the gains plan",
+            "lock in a gains plan",
+            "lock in the gains plan",
+            "i want the gains diet",
+            "set the gains plan",
+        ]
+        return phrases.contains { lower.contains($0) }
+    }
+
+    private static func dietReplyIfNeeded(
+        messages: [ChatMessageDTO],
+        goalType: String?,
+        goal: MacroGoalPayload?,
+        weightKg: Double
+    ) -> TrainerChatResponse? {
+        guard let lastUser = messages.last(where: { $0.role == "user" })?.content else { return nil }
+        let text = lastUser.lowercased()
+        guard !isGainsDietSetupCommand(text) else { return nil }
+        guard !looksLikeConfirmedFoodLog(text), !looksLikeFoodConfirmation(text), !looksLikeExerciseLog(text) else {
+            return nil
+        }
+        guard looksLikeDietQuestion(text) else { return nil }
+
+        let current = GoalType(rawValue: goalType ?? "") ?? .maintain
+        let topic: GoalType = isGainsDietQuestion(text) ? .gain : current
+        let reply = GoalCalculator.dietCoachingReply(
+            topic: topic,
+            current: current,
+            calories: goal?.calories,
+            proteinG: goal?.proteinG,
+            carbsG: goal?.carbsG,
+            fatG: goal?.fatG,
+            weightKg: weightKg,
+            prefersPlants: text.contains("vegan") || text.contains("vegetarian") || text.contains("plant-based")
+        )
+        return TrainerChatResponse(
+            reply: reply,
+            replies: nil,
+            suggested_goal: nil,
+            suggested_meal: nil,
+            suggested_exercise: nil
+        )
+    }
+
+    private static func isGainsDietQuestion(_ text: String) -> Bool {
+        let phrases = [
+            "for gains", "to make gains", "make gains", "build muscle", "building muscle",
+            "gain muscle", "gaining muscle", "add muscle", "adding muscle", "lean bulk",
+            "bulking", "dirty bulk", "bulk up", "put on muscle", "put on size",
+            "calorie surplus", "lean gains", "get jacked",
+        ]
+        return phrases.contains { text.contains($0) }
+    }
+
+    private static func looksLikeDietQuestion(_ text: String) -> Bool {
+        if isGainsDietQuestion(text) { return true }
+        let phrases = [
+            "what diet", "which diet", "diet should", "diet for", "diet to follow",
+            "what should i follow", "how should i eat", "how do i eat", "eating plan",
+            "nutrition plan", "what do i eat to", "meal plan",
+        ]
+        return phrases.contains { text.contains($0) }
     }
 
     private static func looksLikeExerciseLog(_ text: String) -> Bool {
@@ -639,26 +725,36 @@ enum TrainerService {
         return triggers.contains { text.contains($0) }
     }
 
-    private static func leanMealSuggestions(remaining: MacroTotals, goal: MacroGoalPayload) -> String {
+    private static func leanMealSuggestions(remaining: MacroTotals, goal: MacroGoalPayload, goalType: String? = nil) -> String {
         let cal = Int(remaining.calories)
         let protein = Int(remaining.proteinG)
         var options: [String] = []
+        let building = goalType == GoalType.gain.rawValue
 
-        if remaining.proteinG >= 25 {
-            options.append("grilled chicken or fish with roasted veggies (~\(min(400, cal)) cal, high protein)")
-        }
-        if remaining.proteinG >= 15 {
-            options.append("Greek yogurt with berries (~\(min(250, cal)) cal)")
-        }
-        if remaining.calories >= 300 {
-            options.append("egg whites + whole eggs scramble with spinach (~\(min(350, cal)) cal)")
+        if building {
+            options.append("chicken, rice, and vegetables (~\(min(550, max(cal, 0))) cal)")
+            options.append("eggs and oats (~\(min(450, max(cal, 0))) cal)")
+            options.append("Greek yogurt or a shake to close the \(protein) g protein gap")
+        } else {
+            if remaining.proteinG >= 25 {
+                options.append("grilled chicken or fish with roasted veggies (~\(min(400, cal)) cal, high protein)")
+            }
+            if remaining.proteinG >= 15 {
+                options.append("Greek yogurt with berries (~\(min(250, cal)) cal)")
+            }
+            if remaining.calories >= 300 {
+                options.append("egg whites + whole eggs scramble with spinach (~\(min(350, cal)) cal)")
+            }
         }
         if options.isEmpty {
             options.append("a lean protein shake or cottage cheese to close your protein gap")
         }
 
         let list = options.prefix(3).enumerated().map { "\($0.offset + 1). \($0.element)" }.joined(separator: " ")
-        return "You've got ~\(cal) cal and \(protein)g protein left today. Murphy/Gaver style — whole foods, no junk: \(list). Discipline tastes better than regret, baby."
+        if building {
+            return "You've got ~\(cal) cal and \(protein)g protein left. Gains meals — protein plus carbs, not a dirty bulk: \(list). Coaching guidance, not medical advice."
+        }
+        return "You've got ~\(cal) cal and \(protein)g protein left today. Whole foods, no junk: \(list). Discipline tastes better than regret, baby."
     }
 
     private static func offlineReply(

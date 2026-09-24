@@ -28,7 +28,7 @@ enum FoodAnalysisService {
         }
 
         let prepared = image.preparedForFoodAnalysis()
-        guard let jpeg = prepared.jpegData(compressionQuality: 0.7) else {
+        guard let jpeg = prepared.jpegData(compressionQuality: 0.6) else {
             throw APIError.invalidResponse
         }
         let base64 = "data:image/jpeg;base64,\(jpeg.base64EncodedString())"
@@ -48,15 +48,90 @@ enum FoodAnalysisService {
         return try JSONDecoder().decode(FoodAnalysisResult.self, from: data)
     }
 
-    /// Voice/text logging: try Open Food Facts (short timeout), then offline rules. Runs off the chat hot path.
-    static func resolveMealForLogging(from description: String) async -> MealPayload {
+    /// Voice/text logging: try Open Food Facts, then offline rules. Runs off the chat hot path.
+    static func resolveMealForLogging(from description: String, searchTimeout: TimeInterval = 4) async -> MealPayload {
         let query = description.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else { return estimateOffline(from: description) }
 
-        if let product = try? await OpenFoodFactsService.searchBestMatch(query: query) {
+        if let product = try? await OpenFoodFactsService.searchBestMatch(query: query, timeout: searchTimeout) {
             return mealPayload(from: product, userDescription: description)
         }
         return estimateOffline(from: description)
+    }
+
+    /// Start this when the user sends a food log so label lookup overlaps Larry's reply.
+    static func shouldPrefetchNutrition(for text: String) -> Bool {
+        let lower = text.lowercased()
+        let triggers = ["i had", "i ate", "i drank", "just had", "just ate", "just drank", "log my", "log this"]
+        return triggers.contains { lower.contains($0) }
+    }
+
+    /// Label matches keyed by canonical food name. Empty when Open Food Facts misses.
+    static func prefetchedLabelMatches(for utterance: String) async -> [String: MealPayload] {
+        let entries = estimateOffline(from: utterance).entriesForLogging()
+        let queries = entries.isEmpty ? [utterance] : entries.map(\.name)
+        var map: [String: MealPayload] = [:]
+        await withTaskGroup(of: (String, MealPayload?).self) { group in
+            for query in queries.prefix(4) {
+                group.addTask {
+                    let match = await labelMatch(query: query, localCalories: nil)
+                    let key = FoodItemNaming.canonicalName(for: query).lowercased()
+                    return (key, match)
+                }
+            }
+            for await (key, match) in group {
+                if let match {
+                    map[key] = match
+                }
+            }
+        }
+        return map
+    }
+
+    /// One Open Food Facts hit for a single food, rejected when the calories are wildly off the logged estimate.
+    static func labelMatch(query: String, localCalories: Double?) async -> MealPayload? {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        guard let product = try? await OpenFoodFactsService.searchBestMatch(query: trimmed) else { return nil }
+        let payload = mealPayload(from: product, userDescription: trimmed)
+        guard payload.isLabelBacked, payload.calories > 0 else { return nil }
+        guard caloriesArePlausible(payload.calories, comparedTo: localCalories) else { return nil }
+        return payload
+    }
+
+    static func refinement(for mealName: String, calories: Double, prefetched: [String: MealPayload]) -> MealPayload? {
+        let key = FoodItemNaming.canonicalName(for: mealName).lowercased()
+        if let direct = prefetched[key], caloriesArePlausible(direct.calories, comparedTo: calories) {
+            return direct
+        }
+        for (candidate, payload) in prefetched {
+            guard key.count >= 3, candidate.count >= 3 else { continue }
+            if key.contains(candidate) || candidate.contains(key),
+               caloriesArePlausible(payload.calories, comparedTo: calories) {
+                return payload
+            }
+        }
+        return nil
+    }
+
+    /// Only rewrite a saved estimate when it is still the generic placeholder, not a confirmed portion.
+    static func isGenericPlaceholder(calories: Double, proteinG: Double, carbsG: Double, fatG: Double) -> Bool {
+        func close(_ value: Double, _ target: Double) -> Bool { abs(value - target) < 1.5 }
+        if close(calories, 400) && close(proteinG, 25) && close(carbsG, 35) && close(fatG, 12) { return true }
+        if close(calories, 450) && close(proteinG, 28) && close(carbsG, 40) && close(fatG, 18) { return true }
+        guard calories > 0 else { return false }
+        let quantity = (calories / 200).rounded()
+        guard quantity >= 1, quantity <= 6 else { return false }
+        return close(calories, 200 * quantity)
+            && close(proteinG, 10 * quantity)
+            && close(carbsG, 15)
+            && close(fatG, 8)
+    }
+
+    private static func caloriesArePlausible(_ labelCalories: Double, comparedTo localCalories: Double?) -> Bool {
+        guard let localCalories, localCalories > 40 else { return true }
+        let ratio = labelCalories / localCalories
+        return ratio >= 0.25 && ratio <= 4
     }
 
     static func mealPayload(from product: BarcodeProductResult, userDescription: String) -> MealPayload {
@@ -337,7 +412,7 @@ extension FoodAnalysisService {
 private extension UIImage {
     /// Keeps label text legible for vision models without oversized uploads.
     func preparedForFoodAnalysis() -> UIImage {
-        let maxEdge: CGFloat = 1280
+        let maxEdge: CGFloat = 1024
         let longest = max(size.width, size.height)
         guard longest > maxEdge else { return self }
 

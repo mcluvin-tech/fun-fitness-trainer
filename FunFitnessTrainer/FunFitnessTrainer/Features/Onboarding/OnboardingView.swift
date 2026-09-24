@@ -11,6 +11,8 @@ struct OnboardingView: View {
     @State private var goalWeightKg = 70.3
     @State private var weeklyLbChange = -1.0
     @State private var weeklyManuallySet = false
+    @State private var trainingFocus: GoalType = .maintain
+    @State private var focusChosen = false
 
     @State private var sex: Sex = .male
     @State private var age = 30
@@ -33,7 +35,7 @@ struct OnboardingView: View {
             weeklyLbChangeTarget: weeklyLbChange,
             usesImperialUnits: usesImperial,
             activity: activity,
-            goalType: inferredGoalType,
+            goalType: activeGoalType,
             trainerVoice: LarryMcQuade.defaultVoice
         )
     }
@@ -187,6 +189,21 @@ struct OnboardingView: View {
 
     private var weightsStep: some View {
         VStack(alignment: .leading, spacing: 24) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("What are you training for?")
+                    .font(.headline)
+                    .foregroundStyle(BrandTheme.homePrimaryText)
+                Picker("Training focus", selection: focusBinding) {
+                    Text("Lose fat").tag(GoalType.lose)
+                    Text("Maintain").tag(GoalType.maintain)
+                    Text("Make gains").tag(GoalType.gain)
+                }
+                .pickerStyle(.segmented)
+                Text(focusCaption)
+                    .font(.caption)
+                    .foregroundStyle(BrandTheme.homeSecondaryText)
+            }
+
             Picker("Units", selection: $usesImperial) {
                 Text("lb").tag(true)
                 Text("kg").tag(false)
@@ -209,7 +226,7 @@ struct OnboardingView: View {
                     .font(.caption)
                     .foregroundStyle(BrandTheme.homeSecondaryText)
 
-                if inferredGoalType == .maintain {
+                if activeGoalType == .maintain {
                     Text("Maintaining — calories stay at maintenance.")
                         .font(.subheadline)
                         .foregroundStyle(BrandTheme.homeSecondaryText)
@@ -292,7 +309,7 @@ struct OnboardingView: View {
                 ForEach(ActivityLevel.allCases) { Text($0.displayName).tag($0) }
             }
 
-            if inferredGoalType == .maintain {
+            if activeGoalType == .maintain {
                 Text("Current and goal weight are close — we'll use maintenance calories.")
                     .font(.caption)
                     .foregroundStyle(BrandTheme.homeSecondaryText)
@@ -345,6 +362,20 @@ struct OnboardingView: View {
                 .font(.subheadline)
                 .foregroundStyle(BrandTheme.homeSecondaryText)
 
+            Text(diet.title)
+                .font(.headline)
+                .foregroundStyle(BrandTheme.homePrimaryText)
+            Text(diet.summary)
+                .font(.caption)
+                .foregroundStyle(BrandTheme.homeSecondaryText)
+            VStack(alignment: .leading, spacing: 8) {
+                ForEach(diet.points, id: \.self) { point in
+                    Text(point)
+                        .font(.caption)
+                        .foregroundStyle(BrandTheme.homeSecondaryText)
+                }
+            }
+
             Text(plan.macroAdvice)
                 .font(.caption)
                 .foregroundStyle(BrandTheme.homeSecondaryText)
@@ -374,16 +405,36 @@ struct OnboardingView: View {
             .background(BrandTheme.homeCard, in: RoundedRectangle(cornerRadius: 10))
     }
 
-    private var inferredGoalType: GoalType {
+    private var weightInferredGoal: GoalType {
         let diff = goalWeightKg - currentWeightKg
         if diff < -0.5 { return .lose }
         if diff > 0.5 { return .gain }
         return .maintain
     }
 
+    /// Explicit "Make gains" wins even when the scale goal is still close to today's weight.
+    private var activeGoalType: GoalType {
+        focusChosen ? trainingFocus : weightInferredGoal
+    }
+
+    private var diet: DietGuidance {
+        GoalCalculator.dietGuidance(for: activeGoalType, plan: plan)
+    }
+
+    private var focusCaption: String {
+        switch activeGoalType {
+        case .gain:
+            return "Make gains sets a protein-forward surplus. You'll see the diet on the plan step. Coaching guidance, not medical advice."
+        case .lose:
+            return "Lose fat keeps protein high and calories under maintenance."
+        case .maintain:
+            return "Maintain eats to your calorie target. Protein still comes first."
+        }
+    }
+
     private var goalSummaryCard: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(inferredGoalType.displayName)
+            Text(activeGoalType.displayName)
                 .font(.subheadline.weight(.semibold))
                 .foregroundStyle(BrandTheme.homePrimaryText)
             Text("≈ \(Int(plan.targetCalories)) kcal/day at this pace")
@@ -404,7 +455,7 @@ struct OnboardingView: View {
     }
 
     private var weeklySliderRange: ClosedRange<Double> {
-        switch inferredGoalType {
+        switch activeGoalType {
         case .lose: return -2.0...(-0.5)
         case .gain: return 0.25...0.75
         case .maintain: return 0...0
@@ -412,7 +463,7 @@ struct OnboardingView: View {
     }
 
     private var weeklyPaceLabel: String {
-        if inferredGoalType == .maintain { return "Maintaining" }
+        if activeGoalType == .maintain { return "Maintaining" }
         let absLb = abs(weeklyLbChange)
         let dir = weeklyLbChange < 0 ? "lose" : "gain"
         return String(format: "%.2f lb/week (%@)", absLb, dir)
@@ -426,14 +477,46 @@ struct OnboardingView: View {
         return "You can look jacked like me if you follow my program."
     }
 
+    private var focusBinding: Binding<GoalType> {
+        Binding(
+            get: { trainingFocus },
+            set: { newValue in
+                trainingFocus = newValue
+                focusChosen = true
+                weeklyManuallySet = false
+                if newValue == .gain, goalWeightKg + 0.4 < currentWeightKg {
+                    goalWeightKg = currentWeightKg
+                }
+                if newValue == .lose, goalWeightKg > currentWeightKg + 0.4 {
+                    goalWeightKg = currentWeightKg
+                }
+                applyDefaultPace(for: newValue)
+            }
+        )
+    }
+
     private func syncWeeklyIfNeeded() {
         guard !weeklyManuallySet else { return }
+        if !focusChosen {
+            trainingFocus = weightInferredGoal
+        }
+        applyDefaultPace(for: activeGoalType)
+    }
+
+    private func applyDefaultPace(for goal: GoalType) {
         let suggested = GoalCalculator.recommendedWeeklyLbChange(
             currentLb: currentWeightKg * GoalCalculator.kgToLb,
             goalLb: goalWeightKg * GoalCalculator.kgToLb,
-            goalType: inferredGoalType
+            goalType: goal
         )
-        weeklyLbChange = suggested
+        switch goal {
+        case .maintain:
+            weeklyLbChange = 0
+        case .lose:
+            weeklyLbChange = min(suggested, -0.5)
+        case .gain:
+            weeklyLbChange = max(suggested, focusChosen ? 0.5 : 0.25)
+        }
     }
 
     private func updateHeightCm() {
@@ -535,7 +618,7 @@ struct OnboardingView: View {
             weeklyLbChangeTarget: weeklyLbChange,
             usesImperialUnits: usesImperial,
             activity: activity,
-            goalType: inferredGoalType,
+            goalType: activeGoalType,
             trainerVoice: LarryMcQuade.defaultVoice
         )
         context.insert(settings)
@@ -551,7 +634,7 @@ struct OnboardingView: View {
         settings.weeklyLbChangeTarget = weeklyLbChange
         settings.usesImperialUnits = usesImperial
         settings.activity = activity
-        settings.goalType = inferredGoalType
+        settings.goalType = activeGoalType
         if settings.trainerVoice.isEmpty {
             settings.trainerVoice = LarryMcQuade.defaultVoice
         }

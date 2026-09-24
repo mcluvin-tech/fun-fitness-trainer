@@ -3,6 +3,13 @@ import Foundation
 /// Daily calorie adjustment per pound of body-weight change per week (~3,500 kcal per lb).
 private let kcalPerLbPerWeek: Double = 3500.0 / 7.0
 
+struct DietGuidance: Equatable {
+    let title: String
+    let summary: String
+    /// Short coaching lines. Not medical advice.
+    let points: [String]
+}
+
 struct FitnessPlan: Equatable {
     let goalType: GoalType
     /// Signed: negative = losing lb/week, positive = gaining, zero = maintain.
@@ -29,6 +36,137 @@ enum GoalCalculator {
 
     static func recommendedMacros(for settings: UserSettings) -> MacroGoalPayload {
         buildPlan(for: settings).macros
+    }
+
+    /// Diet pattern that matches the calorie model already used for the plan.
+    static func dietGuidance(for goalType: GoalType, plan: FitnessPlan) -> DietGuidance {
+        let calories = Int(plan.targetCalories)
+        let protein = Int(plan.macros.proteinG)
+        let carbs = Int(plan.macros.carbsG)
+        let fat = Int(plan.macros.fatG)
+        let delta = Int(plan.dailyCalorieDelta.rounded())
+
+        switch goalType {
+        case .gain:
+            let surplus = delta > 0 ? "about \(delta) kcal above maintenance" : "a modest surplus over maintenance"
+            return DietGuidance(
+                title: "Gains diet",
+                summary: "Protein-forward lean surplus. Coaching guidance, not medical advice.",
+                points: [
+                    "Eat about \(calories) kcal — \(surplus) — so training has fuel without a dirty bulk.",
+                    "Protein around \(protein) g. Build meals on meat, fish, eggs, Greek yogurt, or a shake.",
+                    "Carbs around training (about \(carbs) g): rice, potatoes, oats, fruit.",
+                    "Keep fats moderate (about \(fat) g) from olive oil, nuts, and avocado. Don't spend the surplus on junk.",
+                ]
+            )
+        case .lose:
+            let deficit = delta < 0 ? "about \(abs(delta)) kcal under maintenance" : "under maintenance"
+            return DietGuidance(
+                title: "Cut diet",
+                summary: "High protein, mostly whole foods. Coaching guidance, not medical advice.",
+                points: [
+                    "Eat about \(calories) kcal — \(deficit). Don't crash below the plan.",
+                    "Protein around \(protein) g from meat, fish, eggs, and Greek yogurt.",
+                    "Vegetables on the plate. Carbs (about \(carbs) g) around training, not from junk.",
+                    "Fats around \(fat) g. Skip liquid calories.",
+                ]
+            )
+        case .maintain:
+            return DietGuidance(
+                title: "Maintenance diet",
+                summary: "Protein-forward, eat to the plan. Coaching guidance, not medical advice.",
+                points: [
+                    "Eat about \(calories) kcal — that's maintenance for this setup.",
+                    "Protein around \(protein) g. Same foods: meat, fish, eggs, Greek yogurt.",
+                    "Carbs about \(carbs) g and fats about \(fat) g. Adjust portions before you overhaul the menu.",
+                ]
+            )
+        }
+    }
+
+    /// Larry-voiced answer for "what diet should I follow?"
+    /// `topic` is what they asked about. `current` is the plan already saved in setup.
+    static func dietCoachingReply(
+        topic: GoalType,
+        current: GoalType,
+        calories: Double?,
+        proteinG: Double?,
+        carbsG: Double?,
+        fatG: Double?,
+        weightKg: Double,
+        prefersPlants: Bool
+    ) -> String {
+        let proteinPerLb = Int((max(weightKg, 40) * kgToLb).rounded())
+        var lines: [String] = []
+
+        if topic == .gain && current != .gain {
+            lines.append("You want gains. Your saved plan is still \(currentPhrase(current)). A gains diet is a modest surplus, not a dirty bulk and not a medical prescription.")
+            lines.append("Protein around \(proteinPerLb) g (about 1 g per lb), carbs around training — rice, potatoes, oats, fruit — and fats from olive oil, nuts, avocado.")
+            lines.append("Say \"set my plan for gains\" and I'll lock today's targets to that surplus.")
+        } else if let calories, let proteinG, let carbsG, let fatG {
+            let plan = provisionalPlan(
+                goalType: topic,
+                calories: calories,
+                proteinG: proteinG,
+                carbsG: carbsG,
+                fatG: fatG
+            )
+            lines.append(openingLine(for: topic))
+            lines.append(contentsOf: dietGuidance(for: topic, plan: plan).points)
+        } else {
+            lines.append(openingLine(for: topic))
+            lines.append("Finish setup so I can pin real numbers. Protein stays near \(proteinPerLb) g. Surplus only if you're training to add size.")
+        }
+
+        if prefersPlants {
+            lines.append("No meat? Eggs, dairy, tofu, or a shake can cover the same protein target.")
+        }
+        if topic != .gain || current == .gain {
+            lines.append("Say \"set my plan for gains\" if you want the surplus locked in.")
+        }
+        lines.append("Coaching guidance, not medical advice.")
+        return lines.joined(separator: " ")
+    }
+
+    private static func openingLine(for goalType: GoalType) -> String {
+        switch goalType {
+        case .gain:
+            return "You want gains? Fine. Protein first, modest surplus, carbs around the workout. Not a dirty bulk, and not a doctor's note."
+        case .lose:
+            return "You want the cut. High protein, eat the deficit on the plan, and don't slash it further because you're impatient."
+        case .maintain:
+            return "Maintenance. Hit the protein, eat to the calorie target, and stop reinventing breakfast every Monday."
+        }
+    }
+
+    private static func currentPhrase(_ goalType: GoalType) -> String {
+        switch goalType {
+        case .gain: return "a gains surplus"
+        case .lose: return "a cut"
+        case .maintain: return "maintenance"
+        }
+    }
+
+    /// Numbers-only plan so diet copy can quote today's targets without rebuilding TDEE.
+    private static func provisionalPlan(
+        goalType: GoalType,
+        calories: Double,
+        proteinG: Double,
+        carbsG: Double,
+        fatG: Double
+    ) -> FitnessPlan {
+        FitnessPlan(
+            goalType: goalType,
+            weeklyLbChange: goalType == .gain ? 0.5 : (goalType == .lose ? -0.5 : 0),
+            weeksToGoal: nil,
+            maintenanceCalories: calories,
+            targetCalories: calories,
+            dailyCalorieDelta: 0,
+            macros: MacroGoalPayload(calories: calories, proteinG: proteinG, carbsG: carbsG, fatG: fatG),
+            coachStyleName: LarryMcQuade.name,
+            coachSummary: "",
+            macroAdvice: ""
+        )
     }
 
     static func buildPlan(for settings: UserSettings) -> FitnessPlan {

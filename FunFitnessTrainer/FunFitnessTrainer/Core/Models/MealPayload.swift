@@ -158,6 +158,26 @@ enum MealLogging {
         return inserted
     }
 
+    /// Update one row in place so a label lookup doesn't duplicate the log or the pack post.
+    static func applyLabelData(_ payload: MealPayload, to meal: Meal, in context: ModelContext) {
+        let entry = payload.entriesForLogging().first ?? payload
+        meal.name = FoodItemNaming.canonicalName(for: entry.name)
+        meal.calories = entry.calories
+        meal.proteinG = entry.proteinG
+        meal.carbsG = entry.carbsG
+        meal.fatG = entry.fatG
+        meal.isEstimate = !payload.isLabelBacked
+        if let barcode = payload.barcode {
+            meal.barcode = barcode
+        }
+        if !payload.assumptions.isEmpty,
+           let encoded = try? JSONEncoder().encode(payload.assumptions),
+           let json = String(data: encoded, encoding: .utf8) {
+            meal.assumptionsJSON = json
+        }
+        try? context.save()
+    }
+
     /// Swap a just-logged estimate for label-backed Open Food Facts data without adding duplicate rows.
     static func replace(meals: [Meal], with payload: MealPayload, in context: ModelContext) {
         guard !meals.isEmpty else { return }

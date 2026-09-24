@@ -265,7 +265,7 @@ struct CoachChatView: View {
             VStack(alignment: .leading, spacing: 6) {
                 Text(LarryMcQuade.tagline)
                     .font(.subheadline.weight(.semibold))
-                Text("Say what you ate or drank to log it, tell Larry about a workout to earn calories, or ask about food or drinks you're thinking of having.")
+                Text("Say what you ate or drank to log it, ask what diet to follow for gains, or tell Larry about a workout to earn calories.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -377,6 +377,16 @@ struct CoachChatView: View {
         isLoading = true
         defer { isLoading = false }
 
+        let userText = messages.last(where: { $0.isUser })?.text ?? ""
+        if let settings = settingsList.first, TrainerService.isGainsDietSetupCommand(userText) {
+            applyGainsDiet(settings)
+            return
+        }
+
+        let prefetch: Task<[String: MealPayload], Never>? = FoodAnalysisService.shouldPrefetchNutrition(for: userText)
+            ? Task { await FoodAnalysisService.prefetchedLabelMatches(for: userText) }
+            : nil
+
         let dtos = messages.map { ChatMessageDTO(role: $0.isUser ? "user" : "assistant", content: $0.text) }
         let settings = settingsList.first
 
@@ -394,7 +404,7 @@ struct CoachChatView: View {
         )
         appendLarryMessages(response)
         persistChat()
-        applySuggestedMeal(response.suggested_meal)
+        applySuggestedMeal(response.suggested_meal, prefetch: prefetch)
         applySuggestedExercise(response.suggested_exercise)
         markCoachSeenToday()
     }
@@ -405,26 +415,74 @@ struct CoachChatView: View {
         }
     }
 
-    private func applySuggestedMeal(_ payload: MealPayload?) {
+    private func applySuggestedMeal(_ payload: MealPayload?, prefetch: Task<[String: MealPayload], Never>? = nil) {
         guard let payload else { return }
-        // Insert immediately so Today's log and macro rings update cumulatively.
+        // Insert immediately so Today's log and macro rings update without waiting on search.
         let inserted = MealLogging.insertReturningMeals(payload, into: context)
+        let mealIDs = inserted.map(\.id)
 
-        let source = latestFoodLogDescription() ?? payload.name
         Task {
-            let resolved = await FoodAnalysisService.resolveMealForLogging(from: source)
-            guard resolved.isLabelBacked else { return }
+            let prefetched = await prefetch?.value ?? [:]
+            let snapshots: [(id: UUID, name: String, calories: Double)] = await MainActor.run {
+                inserted.compactMap { meal in
+                    guard meal.isEstimate, meal.barcode == nil else { return nil }
+                    return (meal.id, meal.name, meal.calories)
+                }
+            }
+            var updates: [(UUID, MealPayload)] = []
+            for snapshot in snapshots {
+                if let match = FoodAnalysisService.refinement(
+                    for: snapshot.name,
+                    calories: snapshot.calories,
+                    prefetched: prefetched
+                ) {
+                    updates.append((snapshot.id, match))
+                    continue
+                }
+                if let match = await FoodAnalysisService.labelMatch(query: snapshot.name, localCalories: snapshot.calories) {
+                    updates.append((snapshot.id, match))
+                }
+            }
+            guard !updates.isEmpty else { return }
             await MainActor.run {
-                MealLogging.replace(meals: inserted, with: resolved, in: context)
+                let mealsByID = Dictionary(uniqueKeysWithValues: inserted.map { ($0.id, $0) })
+                for (id, match) in updates {
+                    guard mealIDs.contains(id), let meal = mealsByID[id] else { continue }
+                    MealLogging.applyLabelData(match, to: meal, in: context)
+                }
             }
         }
     }
 
-    private func latestFoodLogDescription() -> String? {
-        guard let text = messages.last(where: { $0.isUser })?.text else { return nil }
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return nil }
-        return FoodItemNaming.loggedFoodDescription(from: trimmed) ?? trimmed
+    private func applyGainsDiet(_ settings: UserSettings) {
+        settings.goalType = .gain
+        if (settings.weeklyLbChangeTarget ?? 0) < 0.25 {
+            settings.weeklyLbChangeTarget = 0.5
+        }
+        let plan = GoalCalculator.buildPlan(for: settings)
+        let guidance = GoalCalculator.dietGuidance(for: .gain, plan: plan)
+        let payload = plan.macros
+        let start = DaySummaryService.startOfDay()
+        if let existing = goals.first(where: { Calendar.current.isDate($0.date, inSameDayAs: start) }) {
+            existing.calories = payload.calories
+            existing.proteinG = payload.proteinG
+            existing.carbsG = payload.carbsG
+            existing.fatG = payload.fatG
+        } else {
+            context.insert(DailyGoal(
+                date: Date(),
+                calories: payload.calories,
+                proteinG: payload.proteinG,
+                carbsG: payload.carbsG,
+                fatG: payload.fatG
+            ))
+        }
+        markCoachSeenToday()
+        let detail = guidance.points.joined(separator: " ")
+        let text = "Fine. Gains targets are locked — \(detail) Coaching guidance, not a doctor's note. Let's not be a little bitch and destroy our gains."
+        messages.append(ChatBubble(text: text, isUser: false))
+        persistChat()
+        try? context.save()
     }
 
     private func applySuggestedExercise(_ payload: ExercisePayload?) {

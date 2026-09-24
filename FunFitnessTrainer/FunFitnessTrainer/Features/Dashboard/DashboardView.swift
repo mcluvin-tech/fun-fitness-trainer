@@ -482,7 +482,13 @@ struct DashboardView: View {
                 changed = true
             }
 
-            guard meal.isEstimate else { continue }
+            guard meal.isEstimate, meal.barcode == nil else { continue }
+            guard FoodAnalysisService.isGenericPlaceholder(
+                calories: meal.calories,
+                proteinG: meal.proteinG,
+                carbsG: meal.carbsG,
+                fatG: meal.fatG
+            ) else { continue }
             guard FoodAnalysisService.hasKnownNutrition(for: cleaned),
                   let entry = FoodAnalysisService.estimateForStoredName(cleaned) else { continue }
 

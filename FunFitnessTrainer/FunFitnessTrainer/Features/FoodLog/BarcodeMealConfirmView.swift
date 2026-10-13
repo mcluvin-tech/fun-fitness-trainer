@@ -1,30 +1,60 @@
 import SwiftUI
 import SwiftData
 
+/// Sheet payload so the scanned code is not lost when the camera cover dismisses.
+struct PendingBarcodeScan: Identifiable, Hashable {
+    let id = UUID()
+    let code: String
+
+    init(_ code: String = "") {
+        self.code = code.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
 struct BarcodeMealConfirmView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.modelContext) private var context
+    @EnvironmentObject private var appState: AppState
 
     let barcode: String
     var onSaved: (() -> Void)?
 
-    @State private var manualBarcode = ""
+    @State private var manualBarcode: String
     @State private var product: BarcodeProductResult?
     @State private var servings: Double = 1
-    @State private var isLoading = false
+    @State private var isLoading: Bool
     @State private var errorMessage: String?
+
+    init(barcode: String, onSaved: (() -> Void)? = nil) {
+        self.barcode = barcode
+        self.onSaved = onSaved
+        let trimmed = barcode.trimmingCharacters(in: .whitespacesAndNewlines)
+        _manualBarcode = State(initialValue: trimmed)
+        _isLoading = State(initialValue: !trimmed.isEmpty)
+    }
 
     var body: some View {
         NavigationStack {
             Form {
-                if product == nil {
+                if product == nil && !isLoading {
                     Section("Barcode") {
-                        TextField("Enter barcode", text: $manualBarcode)
-                            .keyboardType(.numberPad)
-                        Button("Look up product") {
-                            Task { await lookup(barcode: manualBarcode) }
+                        if !barcode.isEmpty {
+                            Text("Scanned: \(BarcodeNormalization.normalizedBarcode(barcode))")
+                                .font(.headline)
+                            Text(errorMessage ?? "Looking up this product failed. Try again.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Button("Look up again") {
+                                Task { await lookup(barcode: barcode) }
+                            }
+                        } else {
+                            TextField("Enter barcode", text: $manualBarcode)
+                                .keyboardType(.numberPad)
+                            Button("Look up product") {
+                                Task { await lookup(barcode: manualBarcode) }
+                            }
+                            .disabled(manualBarcode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isLoading)
                         }
-                        .disabled(manualBarcode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isLoading)
                     }
                 }
 
@@ -71,10 +101,10 @@ struct BarcodeMealConfirmView: View {
                     }
 
                     Section("Nutrition") {
-                        LabeledContent("Calories", value: "\(Int(scaledMacros.calories))")
-                        LabeledContent("Protein", value: "\(Int(scaledMacros.proteinG)) g")
-                        LabeledContent("Carbs", value: "\(Int(scaledMacros.carbsG)) g")
-                        LabeledContent("Fat", value: "\(Int(scaledMacros.fatG)) g")
+                        LabeledContent("Calories", value: "\(scaledMacros.displayedCalories)")
+                        LabeledContent("Protein", value: "\(scaledMacros.displayedProteinG) g")
+                        LabeledContent("Carbs", value: "\(scaledMacros.displayedCarbsG) g")
+                        LabeledContent("Fat", value: "\(scaledMacros.displayedFatG) g")
                     }
 
                     Section {
@@ -129,8 +159,12 @@ struct BarcodeMealConfirmView: View {
         errorMessage = nil
         defer { isLoading = false }
 
+        let recognized = BarcodeNormalization.normalizedBarcode(barcode)
         do {
             product = try await OpenFoodFactsService.lookup(barcode: barcode)
+        } catch is URLError {
+            product = nil
+            errorMessage = "Barcode \(recognized) was read. The food database didn't respond."
         } catch {
             product = nil
             errorMessage = error.localizedDescription
@@ -140,19 +174,25 @@ struct BarcodeMealConfirmView: View {
     private func save() {
         guard let product else { return }
         let macros = scaledMacros
-
-        let meal = Meal(
+        let payload = MealPayload(
             name: product.name,
             calories: macros.calories,
             proteinG: macros.proteinG,
             carbsG: macros.carbsG,
             fatG: macros.fatG,
-            isEstimate: false,
-            barcode: product.barcode
+            barcode: product.barcode,
+            isLabelBacked: true,
+            assumptions: product.servingDescription.map { ["Serving: \($0)"] } ?? [],
+            quantity: servings,
+            unit: "serving",
+            brand: product.brand,
+            source: .manufacturer,
+            confidence: .high
         )
-        context.insert(meal)
-        try? context.save()
-        MealLogging.shareToPack(meal: meal)
+        let inserted = MealLogging.insertReturningMeals(payload, into: context)
+        if let snapshot = LarryReactionSnapshot.capturing(loggedMeals: inserted, in: context) {
+            appState.presentLarryReaction(snapshot)
+        }
         onSaved?()
         dismiss()
     }

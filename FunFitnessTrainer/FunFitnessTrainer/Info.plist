@@ -19,17 +19,19 @@
 	<key>CFBundleShortVersionString</key>
 	<string>1.0</string>
 	<key>CFBundleVersion</key>
-	<string>1</string>
+	<string>16</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>NSCameraUsageDescription</key>
-	<string>We use the camera to photograph meals, scan barcodes, and look up nutrition.</string>
+	<string>We use the camera to photograph meals, scan barcodes, and optionally save progress photos on this device.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
-	<string>We use your photo library so you can pick meal photos to analyze.</string>
+	<string>We use your photo library so you can pick meal photos and optional progress photos stored on this device.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>We use the microphone so you can talk to Larry instead of typing.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
 	<string>We turn your voice into text so Larry can answer with macro facts.</string>
+	<key>NSHealthShareUsageDescription</key>
+	<string>Larry reads your steps and active calories from Apple Health (including Apple Watch) so he can adjust your daily calorie budget and celebrate when you hit your step goal.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>
@@ -37,6 +39,13 @@
 	</dict>
 	<key>UILaunchScreen</key>
 	<dict/>
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
 	<key>UISupportedInterfaceOrientations</key>
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>

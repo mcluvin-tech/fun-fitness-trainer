@@ -36,20 +36,66 @@ final class PhoneSignInHelper: ObservableObject {
 
     func sendOTP() async {
         errorMessage = nil
+        let rawDigits = phoneInput.filter(\.isNumber).count
+        let hasPlus = phoneInput.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("+")
         guard let phone = Self.normalizePhone(phoneInput) else {
+            // #region agent log
+            AgentDebugLog.emit(
+                hypothesisId: "A",
+                location: "PhoneSignInHelper.sendOTP",
+                message: "normalizePhone failed",
+                data: ["rawDigitCount": rawDigits, "hasPlus": hasPlus, "hasBackend": AppConfig.hasBackend]
+            )
+            // #endregion
             errorMessage = "Enter a valid phone number with country code (e.g. +1 555 123 4567)."
             return
         }
+        // #region agent log
+        AgentDebugLog.emit(
+            hypothesisId: "A",
+            location: "PhoneSignInHelper.sendOTP",
+            message: "normalizePhone ok, calling sendPhoneOTP",
+            data: [
+                "rawDigitCount": rawDigits,
+                "hasPlus": hasPlus,
+                "normalizedLength": phone.count,
+                "normalizedPrefix": String(phone.prefix(2)),
+                "hasBackend": AppConfig.hasBackend,
+            ]
+        )
+        // #endregion
         normalizedPhone = phone
         isLoading = true
         defer { isLoading = false }
 
         do {
             try await SupabaseService.shared.sendPhoneOTP(phone: phone)
+            // #region agent log
+            AgentDebugLog.emit(
+                hypothesisId: "D",
+                location: "PhoneSignInHelper.sendOTP",
+                message: "sendPhoneOTP succeeded",
+                data: ["step": "enterOTP"]
+            )
+            // #endregion
             step = .enterOTP
             otpInput = ""
         } catch {
-            errorMessage = error.localizedDescription
+            let ns = error as NSError
+            // #region agent log
+            AgentDebugLog.emit(
+                hypothesisId: "D",
+                location: "PhoneSignInHelper.sendOTP",
+                message: "sendPhoneOTP threw",
+                data: [
+                    "errorDomain": ns.domain,
+                    "errorCode": ns.code,
+                    "errorDescription": error.localizedDescription,
+                ]
+            )
+            // #endregion
+            // Temporary debug suffix so a screenshot still gives us the URLError code.
+            errorMessage = "\(error.localizedDescription) [\(ns.domain):\(ns.code)]"
         }
     }
 

@@ -22,6 +22,7 @@ read_val() {
 SUPABASE_URL="$(read_val SUPABASE_URL "Supabase Project URL (https://xxx.supabase.co)" "https://YOUR_PROJECT.supabase.co")"
 SUPABASE_ANON_KEY="$(read_val SUPABASE_ANON_KEY "Supabase anon or publishable key" "${SUPABASE_PUBLISHABLE_KEY:-YOUR_ANON_KEY}")"
 REVENUECAT_API_KEY="$(read_val REVENUECAT_API_KEY "RevenueCat public API key (optional)" "appl_YOUR_REVENUECAT_KEY")"
+CHALLENGE_LINK_HOST="$(read_val CHALLENGE_LINK_HOST "Challenge link host, no scheme (optional)" "YOUR_CHALLENGE_DOMAIN")"
 
 cat > "$SECRETS" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -34,6 +35,8 @@ cat > "$SECRETS" <<PLIST
 	<string>${SUPABASE_ANON_KEY}</string>
 	<key>REVENUECAT_API_KEY</key>
 	<string>${REVENUECAT_API_KEY}</string>
+	<key>CHALLENGE_LINK_HOST</key>
+	<string>${CHALLENGE_LINK_HOST}</string>
 </dict>
 </plist>
 PLIST

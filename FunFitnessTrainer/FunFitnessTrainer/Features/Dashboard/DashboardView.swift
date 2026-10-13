@@ -8,14 +8,21 @@ struct DashboardView: View {
     @Environment(\.modelContext) private var context
     @Query(sort: \Meal.loggedAt, order: .reverse) private var allMeals: [Meal]
     @Query(sort: \ExerciseLog.loggedAt, order: .reverse) private var allExercises: [ExerciseLog]
-    @Query private var goals: [DailyGoal]
     @Query private var settingsList: [UserSettings]
     @Query private var phrases: [TrainerPhrase]
 
+    @ObservedObject private var healthKit = HealthKitService.shared
+
+    /// When embedded in MainTabView, logging / Larry are owned by the tab shell.
+    var embeddedInTabs: Bool = false
+    var onRequestLog: (() -> Void)? = nil
+    var onOpenLarry: (() -> Void)? = nil
+
     @State private var trainerQuip = LarryMcQuade.randomDashboardGreeting()
     @State private var loadingQuip = false
+    @State private var quoteVisible = false
     @State private var showLarryChat = false
-    @State private var showSettings = false
+    @State private var showMenu = false
     @State private var showLogFood = false
     @State private var showCamera = false
     @State private var showBarcodeScanner = false
@@ -24,10 +31,20 @@ struct DashboardView: View {
     @State private var pendingImage: UIImage?
     @State private var pendingBarcode = ""
     @State private var showConfirm = false
-    @State private var showBarcodeConfirm = false
+    @State private var pendingBarcodeScan: PendingBarcodeScan?
     @State private var showThePack = false
     @State private var showLogExercise = false
     @State private var pendingLogFoodAction: PendingLogFoodAction?
+    @State private var macroExplanation: MacroGoalExplanation?
+    @State private var showDietPicker = false
+    @State private var focusedMacroKind: MacroGoalKind?
+    @State private var pulseKind: MacroGoalKind?
+    @State private var celebrationChip: LogCelebrationChip?
+    @State private var knownMealIDs: Set<UUID> = []
+    @State private var previousConsumed = MacroTotals()
+    @State private var estimateMeal: Meal?
+    @State private var path = NavigationPath()
+
     private var todayMeals: [Meal] {
         DaySummaryService.mealsToday(from: allMeals)
     }
@@ -38,116 +55,145 @@ struct DashboardView: View {
 
     private var todayLogItems: [DailyLogItem] {
         DaySummaryService.combinedLog(meals: todayMeals, exercises: todayExercises)
+            .sorted { $0.loggedAt > $1.loggedAt }
+    }
+
+    private var manualExerciseBurned: Double {
+        DaySummaryService.exerciseCaloriesBurned(for: todayExercises)
     }
 
     private var exerciseBurned: Double {
-        DaySummaryService.exerciseCaloriesBurned(for: todayExercises)
+        DaySummaryService.activityCalorieBonus(
+            manualExerciseCalories: manualExerciseBurned,
+            healthKitActiveEnergy: healthKit.calorieBonusFromHealth,
+            useHealthKit: healthKit.isConnected
+        )
     }
 
     private var consumed: MacroTotals {
         DaySummaryService.totals(for: todayMeals)
     }
 
-    private var todayGoal: DailyGoal? {
-        DaySummaryService.goal(for: Date(), goals: goals)
-    }
-
     private var displayGoal: MacroGoalPayload? {
-        guard let base = baseGoal else { return nil }
-        return DaySummaryService.effectiveGoal(base: base, exerciseCalorieBonus: exerciseBurned)
-    }
-
-    private var baseGoal: MacroGoalPayload? {
-        if let goal = todayGoal {
-            return MacroGoalPayload(
-                calories: goal.calories,
-                proteinG: goal.proteinG,
-                carbsG: goal.carbsG,
-                fatG: goal.fatG
-            )
-        }
-        if let settings = settingsList.first {
-            return GoalCalculator.recommendedMacros(for: settings)
-        }
-        return nil
+        DaySummaryService.foodTarget(from: settingsList.first)
     }
 
     private var streakDays: Int {
         DaySummaryService.streakDays(meals: allMeals)
     }
 
-    private var mealNumbers: [UUID: Int] {
-        var numbers: [UUID: Int] = [:]
-        var index = 1
-        for item in todayLogItems {
-            if case .meal(let meal) = item {
-                numbers[meal.id] = index
-                index += 1
-            }
-        }
-        return numbers
+    private var remaining: MacroTotals? {
+        guard let goal = displayGoal else { return nil }
+        return DaySummaryService.remaining(consumed: consumed, goal: goal)
     }
 
     var body: some View {
-        NavigationStack {
-            ZStack {
+        NavigationStack(path: $path) {
+            ZStack(alignment: .top) {
                 HomeDarkBackground()
 
                 VStack(spacing: 0) {
                     homeTopBar
 
-                    VStack(spacing: 12) {
-                        larrySection
-                        macroSection
-                        logSectionHeader
-                    }
-                    .padding(.horizontal)
-                    .padding(.top, 4)
-
-                    logListContent
-                        .padding(.horizontal)
+                    ScrollView {
+                        VStack(spacing: 18) {
+                            dailyStatusStory
+                            macroSection
+                            logSection
+                            larryCoachStrip
+                                .padding(.bottom, embeddedInTabs ? 100 : 24)
+                        }
+                        .padding(.horizontal, 16)
                         .padding(.top, 8)
-                        .frame(maxHeight: todayLogItems.isEmpty ? nil : .infinity)
+                    }
+                    .scrollIndicators(.hidden)
+                    .refreshable {
+                        normalizeTodayMeals()
+                        await healthKit.refreshToday()
+                        await refreshContextualQuip(force: true)
+                        HomeHaptics.soft()
+                    }
+                }
 
-                    Spacer(minLength: todayLogItems.isEmpty ? 12 : 0)
-
-                    homeActionBar
+                if let chip = celebrationChip {
+                    celebrationOverlay(chip)
                 }
             }
             .preferredColorScheme(.dark)
             .toolbar(.hidden, for: .navigationBar)
-            .task { normalizeTodayMeals() }
-            .refreshable { await refreshQuip() }
+            .navigationDestination(for: UUID.self) { id in
+                if let meal = todayMeals.first(where: { $0.id == id }) {
+                    MealEditView(meal: meal)
+                }
+            }
+            .task {
+                normalizeTodayMeals()
+                await healthKit.bootstrapIfConnected()
+                knownMealIDs = Set(todayMeals.map(\.id))
+                previousConsumed = consumed
+                await refreshContextualQuip(force: true)
+            }
             .onAppear {
-                applyRandomGreeting()
+                normalizeTodayMeals()
+                TrackingCycleService.ensureStarted()
                 if appState.openLarryChatOnNextAppear {
                     appState.openLarryChatOnNextAppear = false
-                    showLarryChat = true
+                    openLarry()
+                }
+            }
+            .onChange(of: todayMeals.map(\.id)) { _, newIDs in
+                normalizeTodayMeals()
+                handleMealLogChange(newIDs: Set(newIDs))
+            }
+            .onChange(of: focusedMacroKind) { _, kind in
+                if kind == .protein, let goal = displayGoal, consumed.proteinG >= goal.proteinG {
+                    applyContextualLarry()
+                    springLarry()
                 }
             }
             .onReceive(NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)) { _ in
-                applyRandomGreeting()
-            }
-            .sheet(isPresented: $showLarryChat) {
-                CoachChatView()
-            }
-            .sheet(isPresented: $showSettings) {
-                NavigationStack {
-                    SettingsView()
+                Task {
+                    await refreshContextualQuip(force: true)
+                    await healthKit.refreshToday()
                 }
             }
+            .fullScreenCover(isPresented: $showLarryChat) {
+                CoachChatView()
+            }
+            .fullScreenCover(item: Binding(
+                get: { embeddedInTabs ? nil : appState.larryReaction },
+                set: { if !embeddedInTabs { appState.larryReaction = $0 } }
+            )) { snapshot in
+                LarryReactsView(
+                    snapshot: snapshot,
+                    onDone: { appState.larryReaction = nil },
+                    onTalkToLarry: {
+                        appState.larryReaction = nil
+                        openLarry()
+                    }
+                )
+            }
+            .sheet(isPresented: $showMenu) {
+                MenuView()
+            }
             .fullScreenCover(isPresented: $showCamera, onDismiss: {
-                if pendingImage != nil {
+                if !pendingBarcode.isEmpty {
+                    pendingBarcodeScan = PendingBarcodeScan(pendingBarcode)
+                    pendingBarcode = ""
+                } else if pendingImage != nil {
                     showConfirm = true
                 }
             }) {
-                CameraCaptureView { image in
+                CameraCaptureView(
+                    onBarcode: { pendingBarcode = $0 }
+                ) { image in
                     pendingImage = image
                 }
             }
             .fullScreenCover(isPresented: $showBarcodeScanner, onDismiss: {
                 if !pendingBarcode.isEmpty {
-                    showBarcodeConfirm = true
+                    pendingBarcodeScan = PendingBarcodeScan(pendingBarcode)
+                    pendingBarcode = ""
                 }
             }) {
                 BarcodeScannerView { code in
@@ -179,9 +225,10 @@ struct DashboardView: View {
                     }
                 }
             }
-            .sheet(isPresented: $showBarcodeConfirm) {
-                BarcodeMealConfirmView(barcode: pendingBarcode) {
-                    pendingBarcode = ""
+            .sheet(item: $pendingBarcodeScan) { scan in
+                BarcodeMealConfirmView(barcode: scan.code) {
+                    pendingBarcodeScan = nil
+                    appState.recordScan()
                 }
             }
             .sheet(isPresented: $showManual) {
@@ -201,6 +248,30 @@ struct DashboardView: View {
             .sheet(isPresented: $showLogExercise) {
                 LogExerciseSheet()
             }
+            .sheet(item: $macroExplanation) { explanation in
+                if explanation.kind == .calories, let settings = settingsList.first {
+                    CalorieGoalSheet(
+                        settings: settings,
+                        exerciseCalorieBonus: exerciseBurned
+                    )
+                } else {
+                    MacroGoalExplanationSheet(explanation: explanation)
+                }
+            }
+            .sheet(isPresented: $showDietPicker) {
+                DietStyleEditor(wrapsInNavigationStack: true)
+            }
+            .sheet(isPresented: Binding(
+                get: { estimateMeal != nil },
+                set: { if !$0 { estimateMeal = nil } }
+            )) {
+                if let meal = estimateMeal {
+                    MealEstimateReviewSheet(meal: meal)
+                }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .homeRequestLogFood)) { _ in
+                showLogFood = true
+            }
         }
     }
 
@@ -211,51 +282,133 @@ struct DashboardView: View {
             HomeDateHeader()
 
             HStack {
-                Spacer()
-                Button {
-                    showSettings = true
-                } label: {
-                    Image(systemName: "gearshape")
-                        .font(.body.weight(.semibold))
-                        .foregroundStyle(BrandTheme.homePrimaryText)
-                        .frame(width: 36, height: 36)
-                        .background(BrandTheme.homeCard.opacity(0.65), in: Circle())
-                        .overlay(Circle().stroke(BrandTheme.purple.opacity(0.35), lineWidth: 1))
+                if streakDays > 0 {
+                    StreakFlameIndicator(days: streakDays)
                 }
-                .accessibilityLabel("Settings")
+                Spacer()
+                if !embeddedInTabs {
+                    Button {
+                        showMenu = true
+                    } label: {
+                        Image(systemName: "line.3.horizontal")
+                            .font(.body.weight(.semibold))
+                            .foregroundStyle(BrandTheme.homePrimaryText)
+                            .frame(width: 36, height: 36)
+                            .background(.ultraThinMaterial, in: Circle())
+                            .overlay(Circle().stroke(BrandTheme.homeCardBorder, lineWidth: 1))
+                    }
+                    .accessibilityLabel("Menu")
+                }
             }
         }
-        .padding(.horizontal)
+        .padding(.horizontal, 16)
         .padding(.top, 6)
         .padding(.bottom, 4)
     }
 
-    // MARK: - Larry + quip
+    // MARK: - Daily status story
 
-    private var larrySection: some View {
-        HStack(alignment: .center, spacing: 8) {
-            VStack(alignment: .leading, spacing: 4) {
-                if streakDays > 0 {
-                    StreakFlameIndicator(days: streakDays)
+    @ViewBuilder
+    private var dailyStatusStory: some View {
+        if let goal = displayGoal, let rem = remaining {
+            let eaten = MacroTrackingEngine.displayCalories(consumed.calories)
+            let remainingCal = MacroTrackingEngine.displayCalories(max(rem.calories, 0))
+            let over = rem.calories < 0
+            let pace = DaySummaryService.dailyPaceLine(
+                consumed: consumed,
+                goal: goal,
+                logIsEmpty: todayLogItems.isEmpty
+            )
+
+            VStack(alignment: .leading, spacing: 8) {
+                Button(action: openCalorieExplanation) {
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        Text("\(eaten)")
+                            .font(BrandTheme.typeHero)
+                            .foregroundStyle(BrandTheme.homePrimaryText)
+                            .contentTransition(.numericText())
+                            .animation(.spring(response: 0.5, dampingFraction: 0.85), value: eaten)
+                        Text("cal eaten")
+                            .font(.title3.weight(.medium))
+                            .foregroundStyle(BrandTheme.homeSecondaryText)
+                        Spacer(minLength: 8)
+                        Text(over
+                              ? "\(MacroTrackingEngine.displayCalories(-rem.calories)) over"
+                              : "\(remainingCal.formatted()) remaining")
+                            .font(.subheadline.weight(.semibold).monospacedDigit())
+                            .foregroundStyle(over ? BrandTheme.magenta : BrandTheme.homeSecondaryText)
+                    }
                 }
-                LarryAvatarView(portrait: .home, size: 58)
-            }
+                .buttonStyle(.plain)
+                .accessibilityLabel("\(eaten) calories eaten, \(over ? "\(MacroTrackingEngine.displayCalories(-rem.calories)) over" : "\(remainingCal) remaining"). \(pace)")
+                .accessibilityHint("Shows why this calorie goal is set, and lets you lower it slightly")
 
-            LarrySpeechBubble(text: trainerQuip, isLoading: loadingQuip, maxLines: nil)
-                .layoutPriority(1)
+                HStack(spacing: 8) {
+                    if let settings = settingsList.first {
+                        Button {
+                            showDietPicker = true
+                        } label: {
+                            Label(
+                                settings.hasChosenDiet ? settings.dietStyle.displayName : "Choose a diet",
+                                systemImage: settings.dietStyle.symbolName
+                            )
+                            .font(.caption.weight(.bold))
+                            .foregroundStyle(BrandTheme.teal)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 5)
+                            .background(BrandTheme.teal.opacity(0.16), in: Capsule())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel(settings.hasChosenDiet ? "Diet: \(settings.dietStyle.displayName)" : "Choose a diet")
+                    }
+
+                    Button(action: openCalorieExplanation) {
+                        Text("Why \(Int(goal.calories.rounded())) cal")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(BrandTheme.magenta)
+                    }
+                    .buttonStyle(.plain)
+                }
+
+                Text(pace)
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(BrandTheme.teal.opacity(0.95))
+            }
+            .padding(.horizontal, 4)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     // MARK: - Macros
 
+    private func openCalorieExplanation() {
+        guard let settings = settingsList.first else { return }
+        macroExplanation = GoalCalculator.explanation(
+            for: .calories,
+            settings: settings,
+            exerciseCalorieBonus: exerciseBurned,
+            displayedGoal: displayGoal
+        )
+    }
+
     @ViewBuilder
     private var macroSection: some View {
         if let goal = displayGoal {
-            MacroRingsView(consumed: consumed, goal: goal, exerciseCalorieBonus: exerciseBurned)
-                .padding(.vertical, 4)
-                .accessibilityElement(children: .combine)
-                .accessibilityLabel(macroAccessibilityLabel(goal: goal))
+            MacroRingsView(
+                consumed: consumed,
+                goal: goal,
+                onExplainGoal: { kind in
+                    guard let settings = settingsList.first else { return }
+                    macroExplanation = GoalCalculator.explanation(
+                        for: kind,
+                        settings: settings,
+                        exerciseCalorieBonus: exerciseBurned,
+                        displayedGoal: goal
+                    )
+                },
+                interactiveFocus: true,
+                onFocusChange: { focusedMacroKind = $0 },
+                pulseKind: pulseKind
+            )
         } else {
             Text("Finish onboarding to set your macro targets.")
                 .font(.subheadline)
@@ -265,175 +418,316 @@ struct DashboardView: View {
         }
     }
 
-    // MARK: - Log list
+    // MARK: - Today's log
 
-    private var logSectionHeader: some View {
-        HStack {
-            Text("Today's log")
-                .font(.headline)
-                .foregroundStyle(BrandTheme.homePrimaryText)
-                .accessibilityAddTraits(.isHeader)
-            Spacer()
-            Button {
-                showLogExercise = true
-            } label: {
-                Label("Exercise", systemImage: "figure.run")
-                    .font(.caption.weight(.semibold))
+    private var logSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Today’s log")
+                    .font(BrandTheme.typeSection)
+                    .foregroundStyle(BrandTheme.homePrimaryText)
+                    .accessibilityAddTraits(.isHeader)
+                Spacer()
+                Button {
+                    showLogExercise = true
+                } label: {
+                    Label("Exercise", systemImage: "figure.run")
+                        .font(BrandTheme.typeMeta.weight(.semibold))
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .tint(BrandTheme.neonBlue)
             }
-            .buttonStyle(.bordered)
-            .tint(BrandTheme.neonBlue)
-            if !todayLogItems.isEmpty {
-                Text("\(todayLogItems.count) item\(todayLogItems.count == 1 ? "" : "s")")
-                    .font(.caption)
-                    .foregroundStyle(BrandTheme.homeSecondaryText)
-            }
-        }
-    }
 
-    private var logListContent: some View {
-        Group {
             if todayLogItems.isEmpty {
-                Text("Nothing logged yet today — snap food, tell Larry, or log a workout to earn extra calories.")
+                Text("Nothing logged yet. Snap food, talk to Larry, or log a workout.")
                     .font(.subheadline)
                     .foregroundStyle(BrandTheme.homeSecondaryText)
                     .multilineTextAlignment(.center)
-                    .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity)
-                    .padding(.vertical, 12)
+                    .padding(.vertical, 20)
                     .padding(.horizontal, 12)
+                    .elevatedSurface(cornerRadius: 16)
             } else {
-                ScrollView {
-                    LazyVStack(spacing: 0) {
-                        ForEach(todayLogItems) { item in
-                            switch item {
-                            case .meal(let meal):
-                                NavigationLink {
-                                    MealEditView(meal: meal)
-                                } label: {
-                                    MealRowView(
-                                        meal: meal,
-                                        mealNumber: mealNumbers[meal.id],
-                                        showsDisclosure: false
-                                    )
-                                    .padding(.vertical, 10)
-                                    .padding(.horizontal, 12)
-                                }
-                                .buttonStyle(.plain)
-                                .contextMenu {
-                                    Button(role: .destructive) {
-                                        deleteMeal(meal)
-                                    } label: {
-                                        Label("Delete", systemImage: "trash")
-                                    }
-                                }
-                            case .exercise(let exercise):
-                                ExerciseRowView(exercise: exercise)
-                                    .padding(.vertical, 10)
-                                    .padding(.horizontal, 12)
-                                    .contextMenu {
-                                        Button(role: .destructive) {
-                                            deleteExercise(exercise)
-                                        } label: {
-                                            Label("Delete", systemImage: "trash")
-                                        }
-                                    }
-                            }
-
-                            if item.id != todayLogItems.last?.id {
-                                Divider()
-                                    .overlay(BrandTheme.purple.opacity(0.25))
-                                    .padding(.leading, 56)
-                            }
+                VStack(spacing: 14) {
+                    ForEach(todayLogItems) { item in
+                        switch item {
+                        case .meal(let meal):
+                            mealCard(meal)
+                                .transition(.asymmetric(
+                                    insertion: .move(edge: .bottom).combined(with: .opacity),
+                                    removal: .opacity
+                                ))
+                        case .exercise(let exercise):
+                            exerciseCard(exercise)
                         }
                     }
                 }
+                .animation(.spring(response: 0.45, dampingFraction: 0.86), value: todayLogItems.map(\.id))
             }
         }
-        .background(BrandTheme.homeCard, in: RoundedRectangle(cornerRadius: 12))
-        .overlay(
-            RoundedRectangle(cornerRadius: 12)
-                .stroke(
-                    LinearGradient(
-                        colors: [BrandTheme.purple.opacity(0.45), BrandTheme.teal.opacity(0.25)],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    ),
-                    lineWidth: 1
-                )
-        )
-        .clipShape(RoundedRectangle(cornerRadius: 12))
-        .frame(maxHeight: todayLogItems.isEmpty ? 96 : nil)
     }
 
-    // MARK: - Bottom actions: Log food · Larry · The Pack
-
-    private var homeActionBar: some View {
-        HStack(alignment: .bottom, spacing: 0) {
-            Button {
-                if appState.canScanFood && RuntimeEnvironment.isCameraAvailable {
-                    showCamera = true
-                } else {
-                    showLogFood = true
-                }
-            } label: {
-                HomeActionButton(
-                    systemImage: "camera.fill",
-                    label: "Log food",
-                    tint: Color.brandAccent
-                )
-            }
-            .accessibilityLabel("Log food")
-            .contextMenu {
-                Button {
-                    showLogFood = true
-                } label: {
-                    Label("More options", systemImage: "ellipsis.circle")
-                }
-            }
-
-            Spacer(minLength: 8)
-
-            Button {
-                showLarryChat = true
-            } label: {
-                HomeActionButton(
-                    systemImage: "mic.fill",
-                    label: "Larry",
-                    tint: BrandTheme.purple
-                )
-            }
-            .accessibilityLabel("Talk to Larry")
-
-            Spacer(minLength: 8)
-
-            Button {
-                showThePack = true
-            } label: {
-                HomeActionButton(
-                    systemImage: "person.3.fill",
-                    label: "The pack",
-                    tint: BrandTheme.teal
-                )
-            }
-            .accessibilityLabel("The pack community feed")
+    private func mealCard(_ meal: Meal) -> some View {
+        MealRowView(meal: meal, showsDisclosure: false) {
+            estimateMeal = meal
         }
-        .padding(.horizontal, 28)
-        .padding(.top, 14)
-        .padding(.bottom, 8)
-        .safeAreaPadding(.bottom, 4)
-        .background {
-            HomeDockBackground()
-                .overlay(alignment: .top) {
-                    Rectangle()
-                        .fill(
-                            LinearGradient(
-                                colors: [BrandTheme.purple.opacity(0.55), BrandTheme.teal.opacity(0.35)],
-                                startPoint: .leading,
-                                endPoint: .trailing
-                            )
-                        )
-                        .frame(height: 1)
+        .padding(14)
+        .elevatedSurface(cornerRadius: 16, glow: BrandTheme.magenta.opacity(0.35))
+        .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .onTapGesture {
+            path.append(meal.id)
+        }
+        .contextMenu {
+            Button {
+                path.append(meal.id)
+            } label: {
+                Label("Edit", systemImage: "pencil")
+            }
+            Button {
+                duplicateMeal(meal)
+            } label: {
+                Label("Duplicate", systemImage: "plus.square.on.square")
+            }
+            Button(role: .destructive) {
+                deleteMeal(meal)
+            } label: {
+                Label("Delete", systemImage: "trash")
+            }
+        }
+        .swipeActionsCompat(
+            onLeading: { duplicateMeal(meal) },
+            onTrailing: { deleteMeal(meal) }
+        )
+        .onLongPressGesture(minimumDuration: 0.45) {
+            HomeHaptics.light()
+            path.append(meal.id)
+        }
+    }
+
+    private func exerciseCard(_ exercise: ExerciseLog) -> some View {
+        ExerciseRowView(exercise: exercise)
+            .padding(14)
+            .elevatedSurface(cornerRadius: 16, glow: BrandTheme.neonBlue.opacity(0.4))
+            .contextMenu {
+                Button(role: .destructive) {
+                    deleteExercise(exercise)
+                } label: {
+                    Label("Delete", systemImage: "trash")
                 }
+            }
+            .swipeActionsCompat(
+                onLeading: nil,
+                onTrailing: { deleteExercise(exercise) }
+            )
+    }
+
+    // MARK: - Larry coach strip
+
+    private var larryCoachStrip: some View {
+        Button {
+            openLarry()
+        } label: {
+            HStack(alignment: .center, spacing: 12) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Larry")
+                        .font(BrandTheme.typeMeta.weight(.bold))
+                        .foregroundStyle(BrandTheme.teal)
+                    if loadingQuip {
+                        ProgressView()
+                            .controlSize(.mini)
+                            .tint(BrandTheme.teal)
+                    } else {
+                        Text(trainerQuip)
+                            .font(.subheadline.weight(.medium))
+                            .foregroundStyle(BrandTheme.homePrimaryText)
+                            .multilineTextAlignment(.leading)
+                            .lineLimit(3)
+                            .minimumScaleFactor(0.9)
+                            .opacity(quoteVisible ? 1 : 0)
+                            .offset(y: quoteVisible ? 0 : 4)
+                    }
+                }
+                .padding(.vertical, 12)
+                .padding(.horizontal, 14)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background {
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .fill(.ultraThinMaterial)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                .fill(BrandTheme.homeCard)
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                .stroke(BrandTheme.homeCardBorder, lineWidth: 1)
+                        )
+                        .shadow(color: BrandTheme.purple.opacity(0.25), radius: 14, y: 6)
+                }
+
+                Image(systemName: "chevron.right")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(BrandTheme.homeTertiaryText)
+            }
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(loadingQuip ? "Larry is thinking" : "Larry says: \(trainerQuip). Open chat.")
+    }
+
+    // MARK: - Celebration
+
+    private func celebrationOverlay(_ chip: LogCelebrationChip) -> some View {
+        GeometryReader { geo in
+            Text(chip.text)
+                .font(.caption.weight(.bold))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(chip.color.opacity(0.92), in: Capsule())
+                .shadow(color: chip.color.opacity(0.5), radius: 10, y: 4)
+                .position(
+                    x: geo.size.width * chip.xFraction,
+                    y: geo.size.height * chip.yProgress
+                )
+                .opacity(chip.yProgress < 0.22 ? 0 : 1)
+        }
+        .allowsHitTesting(false)
+        .transition(.opacity)
+    }
+
+    // MARK: - Logging reactions
+
+    private func handleMealLogChange(newIDs: Set<UUID>) {
+        let added = newIDs.subtracting(knownMealIDs)
+        knownMealIDs = newIDs
+        guard !added.isEmpty else {
+            previousConsumed = consumed
+            return
+        }
+
+        let delta = MacroTotals(
+            calories: consumed.calories - previousConsumed.calories,
+            proteinG: consumed.proteinG - previousConsumed.proteinG,
+            carbsG: consumed.carbsG - previousConsumed.carbsG,
+            fatG: consumed.fatG - previousConsumed.fatG
+        )
+        previousConsumed = consumed
+
+        if appState.suppressNextLogCelebration {
+            appState.suppressNextLogCelebration = false
+            applyContextualLarry()
+            springLarry()
+            return
+        }
+
+        HomeHaptics.success()
+        playLogCelebration(delta: delta)
+        applyContextualLarry()
+        springLarry()
+    }
+
+    private func playLogCelebration(delta: MacroTotals) {
+        let candidates: [(MacroGoalKind, Double, String, Color, CGFloat)] = [
+            (.protein, delta.proteinG, "+\(MacroTrackingEngine.displayGrams(delta.proteinG))g protein", BrandTheme.neonBlue, 0.62),
+            (.calories, delta.calories, "+\(MacroTrackingEngine.displayCalories(delta.calories)) cal", BrandTheme.magenta, 0.38),
+            (.carbs, delta.carbsG, "+\(MacroTrackingEngine.displayGrams(delta.carbsG))g carbs", BrandTheme.teal, 0.38),
+            (.fat, delta.fatG, "+\(MacroTrackingEngine.displayGrams(delta.fatG))g fat", BrandTheme.purple, 0.62),
+        ]
+        guard let best = candidates.max(by: { abs($0.1) < abs($1.1) }), best.1 > 0.4 else { return }
+
+        pulseKind = best.0
+        celebrationChip = LogCelebrationChip(
+            text: best.2,
+            color: best.3,
+            xFraction: best.4,
+            yProgress: 0.72
+        )
+
+        withAnimation(.easeOut(duration: 0.7)) {
+            celebrationChip = LogCelebrationChip(
+                text: best.2,
+                color: best.3,
+                xFraction: best.4,
+                yProgress: 0.18
+            )
+        }
+
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 750_000_000)
+            withAnimation(.easeOut(duration: 0.2)) {
+                celebrationChip = nil
+            }
+            try? await Task.sleep(nanoseconds: 200_000_000)
+            pulseKind = nil
+        }
+    }
+
+    // MARK: - Larry helpers
+
+    private func openLarry() {
+        if let onOpenLarry {
+            onOpenLarry()
+        } else {
+            showLarryChat = true
+        }
+    }
+
+    private func springLarry() {
+        withAnimation(.spring(response: 0.4, dampingFraction: 0.58)) {
+            quoteVisible = true
+        }
+    }
+
+    private func applyContextualLarry() {
+        guard let goal = displayGoal else {
+            trainerQuip = DaySummaryService.pickRandomDashboardQuip(phrases: phrases)
+            quoteVisible = true
+            return
+        }
+        let result = DaySummaryService.contextualLarryLine(
+            consumed: consumed,
+            goal: goal,
+            latestMealName: todayMeals.last.map { FoodItemNaming.displayTitle(for: $0.name) },
+            streakDays: streakDays,
+            focusedKind: focusedMacroKind,
+            phrases: phrases
+        )
+        withAnimation(.easeInOut(duration: 0.25)) {
+            trainerQuip = LarrySpeechStyle.clean(result.text)
+            quoteVisible = true
+        }
+    }
+
+    private func refreshContextualQuip(force: Bool) async {
+        if force || !quoteVisible {
+            applyContextualLarry()
+        }
+        guard appState.isPro, let goal = displayGoal else { return }
+
+        let proteinRatio = consumed.proteinG / max(goal.proteinG, 1)
+        let tag: PhraseTag = proteinRatio < 0.7
+            ? .underProtein
+            : (consumed.calories >= goal.calories * 0.9 ? .crushedIt : .general)
+
+        loadingQuip = true
+        defer { loadingQuip = false }
+
+        do {
+            let rawVoice = settingsList.first?.trainerVoice ?? ""
+            let voice = rawVoice.isEmpty ? LarryMcQuade.defaultVoice : rawVoice
+            let line = try await TrainerService.reaction(
+                tag: tag,
+                phrases: phrases,
+                trainerVoice: voice,
+                goal: goal,
+                consumed: consumed
+            )
+            withAnimation(.easeOut(duration: 0.35)) {
+                trainerQuip = LarrySpeechStyle.clean(line)
+                quoteVisible = true
+            }
+        } catch {
+            applyContextualLarry()
         }
     }
 
@@ -450,8 +744,7 @@ struct DashboardView: View {
             if RuntimeEnvironment.isCameraAvailable {
                 showBarcodeScanner = true
             } else {
-                pendingBarcode = ""
-                showBarcodeConfirm = true
+                pendingBarcodeScan = PendingBarcodeScan()
             }
         case .manual:
             showManual = true
@@ -463,11 +756,39 @@ struct DashboardView: View {
     }
 
     private func deleteMeal(_ meal: Meal) {
+        HomeHaptics.light()
         context.delete(meal)
         try? context.save()
     }
 
+    private func duplicateMeal(_ meal: Meal) {
+        HomeHaptics.soft()
+        let copy = Meal(
+            name: meal.name,
+            calories: meal.calories,
+            proteinG: meal.proteinG,
+            carbsG: meal.carbsG,
+            fatG: meal.fatG,
+            loggedAt: Date(),
+            photoData: meal.photoData,
+            items: meal.items,
+            assumptions: meal.assumptions,
+            confidence: meal.confidence,
+            isEstimate: meal.isEstimate,
+            barcode: meal.barcode,
+            quantity: meal.quantity ?? 1,
+            unit: meal.unit ?? "serving",
+            preparationState: meal.preparationState,
+            brand: meal.brand,
+            nutritionSource: meal.nutritionSource ?? "generic_estimate",
+            nutritionConfidence: meal.nutritionConfidence ?? "medium"
+        )
+        context.insert(copy)
+        try? context.save()
+    }
+
     private func deleteExercise(_ exercise: ExerciseLog) {
+        HomeHaptics.light()
         context.delete(exercise)
         try? context.save()
     }
@@ -476,82 +797,31 @@ struct DashboardView: View {
         var changed = false
         for meal in todayMeals {
             let cleaned = FoodItemNaming.canonicalName(for: meal.name)
-            let nameChanged = cleaned != meal.name
-            if nameChanged {
+            if cleaned != meal.name {
                 meal.name = cleaned
                 changed = true
             }
 
-            guard meal.isEstimate else { continue }
-            guard FoodAnalysisService.hasKnownNutrition(for: cleaned),
-                  let entry = FoodAnalysisService.estimateForStoredName(cleaned) else { continue }
-
-            let macrosChanged =
-                Int(entry.calories) != Int(meal.calories)
-                || Int(entry.proteinG) != Int(meal.proteinG)
-                || Int(entry.carbsG) != Int(meal.carbsG)
-                || Int(entry.fatG) != Int(meal.fatG)
-
-            if nameChanged || macrosChanged {
-                meal.calories = entry.calories
-                meal.proteinG = entry.proteinG
-                meal.carbsG = entry.carbsG
-                meal.fatG = entry.fatG
+            let repaired = FoodAnalysisService.displayMacros(
+                name: cleaned,
+                calories: meal.calories,
+                proteinG: meal.proteinG,
+                carbsG: meal.carbsG,
+                fatG: meal.fatG
+            )
+            let looksLikeQuantityBug =
+                (cleaned.lowercased().contains("milk") && meal.calories >= 400)
+                || (StapleNutritionDatabase.looksLikePlainIce(cleaned) && meal.calories >= 20)
+            if looksLikeQuantityBug, abs(repaired.calories - meal.calories) > 1 {
+                meal.calories = repaired.calories
+                meal.proteinG = repaired.proteinG
+                meal.carbsG = repaired.carbsG
+                meal.fatG = repaired.fatG
                 changed = true
             }
         }
         if changed {
             try? context.save()
-        }
-    }
-
-    private func macroAccessibilityLabel(goal: MacroGoalPayload) -> String {
-        var label = "Calories \(Int(consumed.calories)) of \(Int(goal.calories)). Protein \(Int(consumed.proteinG)) of \(Int(goal.proteinG)) grams."
-        if exerciseBurned > 0 {
-            label += " Including \(Int(exerciseBurned)) bonus calories from exercise."
-        }
-        return label
-    }
-
-    private func applyRandomGreeting() {
-        var next = DaySummaryService.pickRandomDashboardQuip(phrases: phrases)
-        if next == trainerQuip {
-            for _ in 0..<4 {
-                let candidate = DaySummaryService.pickRandomDashboardQuip(phrases: phrases)
-                if candidate != trainerQuip {
-                    next = candidate
-                    break
-                }
-            }
-        }
-        trainerQuip = next
-    }
-
-    private func refreshQuip() async {
-        guard appState.isPro, displayGoal != nil else {
-            applyRandomGreeting()
-            return
-        }
-
-        let goal = displayGoal!
-        let proteinRatio = consumed.proteinG / max(goal.proteinG, 1)
-        let tag: PhraseTag = proteinRatio < 0.7 ? .underProtein : (consumed.calories >= goal.calories * 0.9 ? .crushedIt : .general)
-
-        loadingQuip = true
-        defer { loadingQuip = false }
-
-        do {
-            let rawVoice = settingsList.first?.trainerVoice ?? ""
-            let voice = rawVoice.isEmpty ? LarryMcQuade.defaultVoice : rawVoice
-            trainerQuip = try await TrainerService.reaction(
-                tag: tag,
-                phrases: phrases,
-                trainerVoice: voice,
-                goal: goal,
-                consumed: consumed
-            )
-        } catch {
-            applyRandomGreeting()
         }
     }
 }
@@ -561,6 +831,58 @@ private enum PendingLogFoodAction {
     case barcode
     case manual
     case confirmPhoto
+}
+
+private struct LogCelebrationChip {
+    let text: String
+    let color: Color
+    let xFraction: CGFloat
+    var yProgress: CGFloat
+}
+
+extension Notification.Name {
+    static let homeRequestLogFood = Notification.Name("homeRequestLogFood")
+}
+
+// MARK: - Swipe helper (cards outside List)
+
+private struct SwipeActionsCompat: ViewModifier {
+    var onLeading: (() -> Void)?
+    var onTrailing: (() -> Void)?
+    @State private var offset: CGFloat = 0
+
+    func body(content: Content) -> some View {
+        content
+            .offset(x: offset)
+            .gesture(
+                DragGesture(minimumDistance: 24)
+                    .onChanged { value in
+                        let dx = value.translation.width
+                        if dx > 0, onLeading != nil {
+                            offset = min(dx, 72)
+                        } else if dx < 0, onTrailing != nil {
+                            offset = max(dx, -72)
+                        }
+                    }
+                    .onEnded { value in
+                        let dx = value.translation.width
+                        if dx > 56, let onLeading {
+                            onLeading()
+                        } else if dx < -56, let onTrailing {
+                            onTrailing()
+                        }
+                        withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
+                            offset = 0
+                        }
+                    }
+            )
+    }
+}
+
+private extension View {
+    func swipeActionsCompat(onLeading: (() -> Void)?, onTrailing: (() -> Void)?) -> some View {
+        modifier(SwipeActionsCompat(onLeading: onLeading, onTrailing: onTrailing))
+    }
 }
 
 // MARK: - Components
@@ -605,7 +927,7 @@ struct LarrySpeechBubble: View {
         .foregroundStyle(BrandTheme.homePrimaryText)
         .background {
             LarrySpeechBubbleShape(tailWidth: tailWidth, tailCenterY: 22)
-                .fill(BrandTheme.homeCard)
+                .fill(BrandTheme.homeCardSolid)
         }
         .overlay {
             LarrySpeechBubbleShape(tailWidth: tailWidth, tailCenterY: 22)
@@ -620,7 +942,6 @@ private struct LarrySpeechBubbleShape: Shape {
     var cornerRadius: CGFloat = 14
     var tailWidth: CGFloat = 12
     var tailHeight: CGFloat = 14
-    /// Points at Larry's mouth when the bubble sits beside his avatar.
     var tailCenterY: CGFloat = 26
 
     func path(in rect: CGRect) -> Path {
@@ -646,62 +967,41 @@ private struct LarrySpeechBubbleShape: Shape {
     }
 }
 
-struct HomeActionButton: View {
-    let systemImage: String
-    var label: String? = nil
-    let tint: Color
-
-    var body: some View {
-        VStack(spacing: 6) {
-            ZStack {
-                Circle()
-                    .fill(tint)
-                    .frame(width: 64, height: 64)
-                Image(systemName: systemImage)
-                    .font(.title2)
-                    .foregroundStyle(.white)
-            }
-            if let label {
-                Text(label)
-                    .font(.caption.weight(.medium))
-                    .foregroundStyle(BrandTheme.homeSecondaryText)
-            }
-        }
-    }
-}
-
 struct ExerciseRowView: View {
     let exercise: ExerciseLog
 
     var body: some View {
-        HStack {
-            RoundedRectangle(cornerRadius: 8)
-                .fill(BrandTheme.neonBlue.opacity(0.15))
-                .frame(width: 48, height: 48)
+        HStack(spacing: 12) {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(BrandTheme.neonBlue.opacity(0.18))
+                .frame(width: 52, height: 52)
                 .overlay {
                     Image(systemName: "figure.run")
+                        .font(.title3.weight(.semibold))
                         .foregroundStyle(BrandTheme.neonBlue)
                 }
             VStack(alignment: .leading, spacing: 4) {
-                Text(exercise.name)
-                    .font(.headline)
+                Text(FoodItemNaming.stripDashes(exercise.name))
+                    .font(BrandTheme.typeItem)
                     .foregroundStyle(BrandTheme.homePrimaryText)
                 if let minutes = exercise.durationMinutes {
                     Text("+\(Int(exercise.caloriesBurned)) cal burned · \(Int(minutes)) min")
-                        .font(.caption)
+                        .font(BrandTheme.typeMeta)
                         .foregroundStyle(BrandTheme.homeSecondaryText)
                 } else {
                     Text("+\(Int(exercise.caloriesBurned)) cal burned")
-                        .font(.caption)
+                        .font(BrandTheme.typeMeta)
                         .foregroundStyle(BrandTheme.homeSecondaryText)
                 }
             }
             Spacer()
             if exercise.isEstimate {
                 Text("Est.")
-                    .font(.caption2)
-                    .padding(4)
+                    .font(.caption2.weight(.semibold))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
                     .background(BrandTheme.neonBlue.opacity(0.2), in: Capsule())
+                    .foregroundStyle(BrandTheme.neonBlue)
             }
         }
     }
@@ -709,69 +1009,221 @@ struct ExerciseRowView: View {
 
 struct MealRowView: View {
     let meal: Meal
-    var mealNumber: Int? = nil
     var showsDisclosure: Bool = true
+    var onReviewEstimate: (() -> Void)? = nil
 
     private var displayName: String {
         FoodItemNaming.displayTitle(for: meal.name)
     }
 
-    var body: some View {
-        HStack(spacing: 12) {
-            mealLeadingBadge
+    private var displayMacros: MacroTotals {
+        meal.storedMacros
+    }
 
-            VStack(alignment: .leading, spacing: 4) {
+    private var mealSlot: String {
+        let hour = Calendar.current.component(.hour, from: meal.loggedAt)
+        switch hour {
+        case 5..<11: return "Breakfast"
+        case 11..<15: return "Lunch"
+        case 15..<17: return "Snack"
+        case 17..<22: return "Dinner"
+        default: return "Late night"
+        }
+    }
+
+    private var needsReview: Bool {
+        meal.confidenceKind == .low || meal.confidenceKind == .medium || meal.isEstimate
+    }
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            mealThumb
+
+            VStack(alignment: .leading, spacing: 6) {
                 Text(displayName)
-                    .font(.headline)
+                    .font(BrandTheme.typeItem)
                     .foregroundStyle(BrandTheme.homePrimaryText)
-                Text("\(Int(meal.calories)) cal · P \(Int(meal.proteinG))g")
-                    .font(.caption)
+                    .multilineTextAlignment(.leading)
+
+                Text("\(displayMacros.displayedCalories) cal · \(displayMacros.displayedProteinG)g protein")
+                    .font(BrandTheme.typeMeta.weight(.medium))
                     .foregroundStyle(BrandTheme.homeSecondaryText)
+
+                HStack(spacing: 8) {
+                    Text(mealSlot)
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(BrandTheme.homeTertiaryText)
+
+                    if needsReview {
+                        Button {
+                            onReviewEstimate?()
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: "exclamationmark.triangle.fill")
+                                    .font(.caption2)
+                                Text("Estimate, review")
+                                    .font(.caption2.weight(.semibold))
+                            }
+                            .foregroundStyle(BrandTheme.magenta)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(BrandTheme.magenta.opacity(0.16), in: Capsule())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityHint("Review AI estimate")
+                    }
+                }
             }
-            Spacer()
-            if meal.isEstimate {
-                Text("Est.")
-                    .font(.caption2)
-                    .padding(4)
-                    .background(BrandTheme.magenta.opacity(0.2), in: Capsule())
-            }
+            Spacer(minLength: 0)
             if showsDisclosure {
                 Image(systemName: "chevron.right")
                     .font(.caption.weight(.semibold))
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(BrandTheme.homeTertiaryText)
+                    .padding(.top, 4)
             }
         }
     }
 
     @ViewBuilder
-    private var mealLeadingBadge: some View {
-        ZStack(alignment: .topLeading) {
-            if let data = meal.photoData, let ui = UIImage(data: data) {
-                Image(uiImage: ui)
-                    .resizable()
-                    .scaledToFill()
-                    .frame(width: 48, height: 48)
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
-            } else {
-                RoundedRectangle(cornerRadius: 8)
-                    .fill(BrandTheme.magenta.opacity(0.12))
-                    .frame(width: 48, height: 48)
-                    .overlay {
-                        Image(systemName: meal.barcode != nil ? "barcode" : "fork.knife")
-                            .foregroundStyle(BrandTheme.magenta.opacity(0.8))
-                    }
-            }
+    private var mealThumb: some View {
+        if let data = meal.photoData, let ui = UIImage(data: data) {
+            Image(uiImage: ui)
+                .resizable()
+                .scaledToFill()
+                .frame(width: 52, height: 52)
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        } else {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(BrandTheme.magenta.opacity(0.14))
+                .frame(width: 52, height: 52)
+                .overlay {
+                    Image(systemName: meal.barcode != nil ? "barcode" : "fork.knife")
+                        .foregroundStyle(BrandTheme.magenta.opacity(0.85))
+                }
+        }
+    }
+}
 
-            if let mealNumber {
-                Text("\(mealNumber)")
-                    .font(.caption2.weight(.bold))
-                    .foregroundStyle(.white)
-                    .frame(minWidth: 18, minHeight: 18)
-                    .padding(.horizontal, 4)
-                    .background(BrandTheme.magenta, in: Capsule())
-                    .offset(x: -6, y: -6)
-                    .accessibilityLabel("Meal \(mealNumber)")
+// MARK: - AI estimate review
+
+struct MealEstimateReviewSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.modelContext) private var context
+    @Bindable var meal: Meal
+    @State private var portionMultiplier: Double = 1
+
+    private var assumptionText: String {
+        let raw: String
+        if !meal.assumptions.isEmpty {
+            raw = meal.assumptions.joined(separator: " ")
+        } else if !meal.items.isEmpty {
+            raw = "We estimated \(meal.items.joined(separator: ", ")). Correct?"
+        } else {
+            raw = "We estimated \(FoodItemNaming.displayTitle(for: meal.name)). Correct?"
+        }
+        return FoodItemNaming.stripDashes(raw)
+    }
+
+    var body: some View {
+        NavigationStack {
+            ZStack {
+                HomeDarkBackground()
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 18) {
+                        HStack(spacing: 12) {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .foregroundStyle(BrandTheme.magenta)
+                            Text("Estimate, review")
+                                .font(.title3.weight(.bold))
+                                .foregroundStyle(BrandTheme.homePrimaryText)
+                        }
+
+                        Text(assumptionText)
+                            .font(.body)
+                            .foregroundStyle(BrandTheme.homePrimaryText)
+                            .fixedSize(horizontal: false, vertical: true)
+
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text("Portion")
+                                .font(BrandTheme.typeMeta.weight(.semibold))
+                                .foregroundStyle(BrandTheme.homeSecondaryText)
+                            HStack {
+                                Button {
+                                    portionMultiplier = max(0.25, portionMultiplier - 0.25)
+                                } label: {
+                                    Image(systemName: "minus.circle.fill")
+                                        .font(.title2)
+                                        .foregroundStyle(BrandTheme.teal)
+                                }
+                                Text(String(format: "%.2g×", portionMultiplier))
+                                    .font(.title3.weight(.bold).monospacedDigit())
+                                    .foregroundStyle(BrandTheme.homePrimaryText)
+                                    .frame(maxWidth: .infinity)
+                                Button {
+                                    portionMultiplier = min(4, portionMultiplier + 0.25)
+                                } label: {
+                                    Image(systemName: "plus.circle.fill")
+                                        .font(.title2)
+                                        .foregroundStyle(BrandTheme.teal)
+                                }
+                            }
+
+                            let scaled = MacroTrackingEngine.scale(meal.storedMacros, by: portionMultiplier)
+                            Text("\(scaled.displayedCalories) cal · P \(scaled.displayedProteinG)g · C \(scaled.displayedCarbsG)g · F \(scaled.displayedFatG)g")
+                                .font(BrandTheme.typeMeta.weight(.medium))
+                                .foregroundStyle(BrandTheme.homeSecondaryText)
+                                .frame(maxWidth: .infinity)
+                        }
+                        .padding(16)
+                        .elevatedSurface(cornerRadius: 16)
+
+                        Button {
+                            applyPortion()
+                            dismiss()
+                        } label: {
+                            Text("Looks right")
+                                .font(.headline)
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(BrandTheme.teal)
+
+                        Button {
+                            dismiss()
+                        } label: {
+                            Text("Edit details")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.bordered)
+                        .tint(BrandTheme.magenta)
+                    }
+                    .padding(20)
+                }
+            }
+            .preferredColorScheme(.dark)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Close") { dismiss() }
+                }
             }
         }
+        .presentationDetents([.medium, .large])
+        .presentationDragIndicator(.visible)
+    }
+
+    private func applyPortion() {
+        let scaled = MacroTrackingEngine.scale(meal.storedMacros, by: portionMultiplier)
+        meal.calories = scaled.calories
+        meal.proteinG = scaled.proteinG
+        meal.carbsG = scaled.carbsG
+        meal.fatG = scaled.fatG
+        if let q = meal.quantity {
+            meal.quantity = q * portionMultiplier
+        }
+        meal.nutritionConfidence = MacroTrackingEngine.NutritionConfidence.high.rawValue
+        meal.isEstimate = false
+        try? context.save()
+        HomeHaptics.success()
     }
 }

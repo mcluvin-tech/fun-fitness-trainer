@@ -1,4 +1,6 @@
 import Foundation
+import Network
+import OSLog
 import UIKit
 
 struct FoodAnalysisResult: Codable {
@@ -10,6 +12,12 @@ struct FoodAnalysisResult: Codable {
     var confidence: Double
     var assumptions: [String]
     var labelDetected: Bool?
+    /// Present when macros came from an on-device barcode → Open Food Facts lookup.
+    var barcode: String?
+    /// How macros were obtained (local barcode, local OCR, or cloud AI).
+    var source: FoodAnalysisSource?
+    /// Vision inventory. Preferred over top-level invented macros for plate photos.
+    var lineItems: [MealLineItem]
 
     enum CodingKeys: String, CodingKey {
         case calories
@@ -18,120 +26,784 @@ struct FoodAnalysisResult: Codable {
         case fatG = "fat_g"
         case items, confidence, assumptions
         case labelDetected = "label_detected"
+        case barcode, source
+        case lineItems = "line_items"
+        case overallConfidence = "overall_confidence"
+    }
+
+    init(
+        calories: Double,
+        proteinG: Double,
+        carbsG: Double,
+        fatG: Double,
+        items: [String],
+        lineItems: [MealLineItem] = [],
+        confidence: Double,
+        assumptions: [String],
+        labelDetected: Bool? = nil,
+        barcode: String? = nil,
+        source: FoodAnalysisSource? = nil
+    ) {
+        self.calories = calories
+        self.proteinG = proteinG
+        self.carbsG = carbsG
+        self.fatG = fatG
+        self.items = items
+        self.confidence = confidence
+        self.assumptions = assumptions
+        self.labelDetected = labelDetected
+        self.barcode = barcode
+        self.source = source
+        self.lineItems = lineItems
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        calories = try c.decodeIfPresent(Double.self, forKey: .calories) ?? 0
+        proteinG = try c.decodeIfPresent(Double.self, forKey: .proteinG) ?? 0
+        carbsG = try c.decodeIfPresent(Double.self, forKey: .carbsG) ?? 0
+        fatG = try c.decodeIfPresent(Double.self, forKey: .fatG) ?? 0
+        items = try c.decodeIfPresent([String].self, forKey: .items) ?? []
+        lineItems = try c.decodeIfPresent([MealLineItem].self, forKey: .lineItems) ?? []
+        if let overall = try c.decodeIfPresent(Double.self, forKey: .overallConfidence) {
+            confidence = overall
+        } else {
+            confidence = try c.decodeIfPresent(Double.self, forKey: .confidence) ?? 0.5
+        }
+        assumptions = try c.decodeIfPresent([String].self, forKey: .assumptions) ?? []
+        labelDetected = try c.decodeIfPresent(Bool.self, forKey: .labelDetected)
+        barcode = try c.decodeIfPresent(String.self, forKey: .barcode)
+        source = try c.decodeIfPresent(FoodAnalysisSource.self, forKey: .source)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(calories, forKey: .calories)
+        try c.encode(proteinG, forKey: .proteinG)
+        try c.encode(carbsG, forKey: .carbsG)
+        try c.encode(fatG, forKey: .fatG)
+        try c.encode(items, forKey: .items)
+        try c.encode(lineItems, forKey: .lineItems)
+        try c.encode(confidence, forKey: .confidence)
+        try c.encode(confidence, forKey: .overallConfidence)
+        try c.encode(assumptions, forKey: .assumptions)
+        try c.encodeIfPresent(labelDetected, forKey: .labelDetected)
+        try c.encodeIfPresent(barcode, forKey: .barcode)
+        try c.encodeIfPresent(source, forKey: .source)
+    }
+
+    var aiFallbackTotals: MacroTotals {
+        MacroTotals(calories: calories, proteinG: proteinG, carbsG: carbsG, fatG: fatG)
+    }
+}
+
+enum FoodAnalysisSource: String, Codable {
+    case barcode
+    case nutritionLabelOCR = "nutrition_label_ocr"
+    case cloudAI = "cloud_ai"
+    case offlineEstimate = "offline_estimate"
+}
+
+enum FoodAnalysisError: LocalizedError {
+    case labelUnreadable
+    case networkUnavailable
+    case barcodeNeedsLookup(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .labelUnreadable:
+            return "Couldn't read the nutrition label clearly. Enter values below, or scan the barcode."
+        case .networkUnavailable:
+            return "Confirm the numbers below. We used an on-device estimate."
+        case .barcodeNeedsLookup:
+            return "Found a barcode. Looking up the product."
+        }
     }
 }
 
 enum FoodAnalysisService {
     static func analyze(image: UIImage, hint: String?) async throws -> FoodAnalysisResult {
+        // Barcode first — cheap and avoids blocking the UI on full-page OCR.
+        if let barcode = await FoodPhotoLocalAnalysis.detectBarcode(in: image) {
+            do {
+                return result(from: try await OpenFoodFactsService.lookup(barcode: barcode))
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                throw FoodAnalysisError.barcodeNeedsLookup(barcode)
+            }
+        }
+
+        let ocrLines = await FoodPhotoLocalAnalysis.recognizedLines(from: image)
+        if let label = FoodPhotoLocalAnalysis.parseNutritionFacts(from: ocrLines) {
+            return label
+        }
+        if let digits = FoodPhotoLocalAnalysis.barcodeDigits(in: ocrLines) {
+            do {
+                return result(from: try await OpenFoodFactsService.lookup(barcode: digits))
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                throw FoodAnalysisError.barcodeNeedsLookup(digits)
+            }
+        }
+
         guard AppConfig.hasBackend else {
             return mockResult()
         }
 
-        let prepared = image.preparedForFoodAnalysis()
-        guard let jpeg = prepared.jpegData(compressionQuality: 0.7) else {
+        guard FoodAnalysisNetwork.isLikelyAvailable else {
+            return offlineAnalysisResult(hint: hint)
+        }
+
+        guard let jpeg = image.jpegDataForFoodAnalysis(maxBytes: 420_000, maxEdge: 1600) else {
             throw APIError.invalidResponse
         }
         let base64 = "data:image/jpeg;base64,\(jpeg.base64EncodedString())"
 
         var body: [String: Any] = ["image_base64": base64]
         if let hint, !hint.isEmpty { body["user_hint"] = hint }
-
-        // Slow cellular / satellite links need a smaller upload and a longer wait.
-        let data = try await SupabaseService.shared.invokeFunction(
-            name: "analyze-food",
-            body: body,
-            timeout: 120
-        )
-        if let err = try? JSONDecoder().decode([String: String].self, from: data), let message = err["error"] {
-            throw APIError.serverMessage(message)
+        let ocrText = ocrLines.prefix(80).joined(separator: "\n")
+        if !ocrText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            body["ocr_text"] = ocrText
         }
-        return try JSONDecoder().decode(FoodAnalysisResult.self, from: data)
+
+        do {
+            let data = try await SupabaseService.shared.invokeFunction(
+                name: "analyze-food",
+                body: body,
+                timeout: 18,
+                retries: 0
+            )
+            if let err = try? JSONDecoder().decode([String: String].self, from: data), let message = err["error"] {
+                throw APIError.serverMessage(message)
+            }
+            var decoded = try JSONDecoder().decode(FoodAnalysisResult.self, from: data)
+            decoded.source = .cloudAI
+            return decoded
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            return offlineAnalysisResult(hint: hint)
+        }
     }
 
-    /// Voice/text logging: try Open Food Facts (short timeout), then offline rules. Runs off the chat hot path.
+    private static func offlineAnalysisResult(hint: String?) -> FoodAnalysisResult {
+        let payload = offlineEstimate(from: hint)
+        let entry = payload.entriesForLogging().first
+        return FoodAnalysisResult(
+            calories: entry?.calories ?? payload.calories,
+            proteinG: entry?.proteinG ?? payload.proteinG,
+            carbsG: entry?.carbsG ?? payload.carbsG,
+            fatG: entry?.fatG ?? payload.fatG,
+            items: [entry?.name ?? payload.name],
+            confidence: 0.35,
+            assumptions: [
+                "Didn't read a barcode or nutrition label. Hold the code in the frame until it locks, or enter numbers.",
+            ],
+            labelDetected: false,
+            barcode: payload.barcode,
+            source: .offlineEstimate
+        )
+    }
+
+    static func isTransientNetworkFailure(_ error: Error) -> Bool {
+        if error is FoodAnalysisError { return false }
+        if let urlError = error as? URLError {
+            switch urlError.code {
+            case .networkConnectionLost, .timedOut, .notConnectedToInternet,
+                 .cannotConnectToHost, .cannotFindHost, .dnsLookupFailed,
+                 .dataNotAllowed, .internationalRoamingOff:
+                return true
+            default:
+                break
+            }
+        }
+        let ns = error as NSError
+        if ns.domain == NSURLErrorDomain {
+            return [
+                NSURLErrorNetworkConnectionLost,
+                NSURLErrorTimedOut,
+                NSURLErrorNotConnectedToInternet,
+                NSURLErrorCannotConnectToHost,
+                NSURLErrorCannotFindHost,
+                NSURLErrorDNSLookupFailed,
+                NSURLErrorDataNotAllowed,
+            ].contains(ns.code)
+        }
+        return false
+    }
+
+    private static func result(from product: BarcodeProductResult) -> FoodAnalysisResult {
+        var assumptions = ["Barcode \(product.barcode) · Open Food Facts"]
+        if let serving = product.servingDescription, !serving.isEmpty {
+            assumptions.append("Serving: \(serving)")
+        }
+        return FoodAnalysisResult(
+            calories: product.perServing.calories,
+            proteinG: product.perServing.proteinG,
+            carbsG: product.perServing.carbsG,
+            fatG: product.perServing.fatG,
+            items: [product.name],
+            confidence: 0.95,
+            assumptions: assumptions,
+            labelDetected: true,
+            barcode: product.barcode,
+            source: .barcode
+        )
+    }
+
+    /// Voice/text logging: staples first (eggs / Dave's), else Open Food Facts, else offline rules.
     static func resolveMealForLogging(from description: String) async -> MealPayload {
         let query = description.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else { return estimateOffline(from: description) }
 
-        if let product = try? await OpenFoodFactsService.searchBestMatch(query: query) {
-            return mealPayload(from: product, userDescription: description)
+        let offline = estimateOffline(from: description)
+        if offline.lineItems.count > 1 || offline.entriesForLogging().count > 1 {
+            // #region agent log
+            AgentDebugLog.emit(
+                hypothesisId: "E",
+                location: "FoodAnalysisService.resolveMealForLogging",
+                message: "skipped lookup for multi-item meal",
+                data: [
+                    "query": query,
+                    "lineItems": offline.lineItems.count,
+                    "calories": offline.calories,
+                    "protein": offline.proteinG,
+                ]
+            )
+            // #endregion
+            return offline
         }
-        return estimateOffline(from: description)
+
+        // Branded staples (Dave's 110/slice, eggs, …) — never let a web hit clobber them.
+        if StapleNutritionDatabase.match(in: description) != nil {
+            // #region agent log
+            AgentDebugLog.emit(
+                hypothesisId: "A",
+                location: "FoodAnalysisService.resolveMealForLogging",
+                message: "staple matched, skipping lookup",
+                data: [
+                    "query": query,
+                    "calories": offline.calories,
+                    "protein": offline.proteinG,
+                    "source": offline.source.rawValue,
+                ]
+            )
+            // #endregion
+            return offline
+        }
+
+        if let food = await USDAFoodDataService.lookupGeneric(query: query) {
+            let fromUSDA = mealPayload(from: food, userDescription: description)
+            // #region agent log
+            AgentDebugLog.emit(
+                hypothesisId: "B",
+                location: "FoodAnalysisService.resolveMealForLogging",
+                message: "using USDA lookup",
+                data: [
+                    "query": query,
+                    "usdaName": food.name,
+                    "grams": food.grams,
+                    "unit": fromUSDA.unit,
+                    "calories": fromUSDA.calories,
+                    "protein": fromUSDA.proteinG,
+                    "carbs": fromUSDA.carbsG,
+                    "fat": fromUSDA.fatG,
+                    "assumedPortion": food.assumedPortion,
+                    "runId": "post-fix",
+                ]
+            )
+            // #endregion
+            return fromUSDA
+        }
+
+        do {
+            if let product = try await OpenFoodFactsService.searchBestMatch(query: query) {
+                let fromOFF = mealPayload(from: product, userDescription: description)
+                let preferOffline = shouldPreferOffline(over: fromOFF, offline: offline, userDescription: description)
+                // #region agent log
+                AgentDebugLog.emit(
+                    hypothesisId: "C",
+                    location: "FoodAnalysisService.resolveMealForLogging",
+                    message: preferOffline ? "kept offline over OFF" : "using OFF match",
+                    data: [
+                        "query": query,
+                        "product": product.name,
+                        "offCalories": fromOFF.calories,
+                        "offProtein": fromOFF.proteinG,
+                        "offlineCalories": offline.calories,
+                        "offlineProtein": offline.proteinG,
+                        "labelBacked": fromOFF.isLabelBacked,
+                        "preferOffline": preferOffline,
+                    ]
+                )
+                // #endregion
+                if preferOffline {
+                    return offline
+                }
+                return fromOFF
+            }
+            // #region agent log
+            AgentDebugLog.emit(
+                hypothesisId: "B",
+                location: "FoodAnalysisService.resolveMealForLogging",
+                message: "OFF search returned nil",
+                data: [
+                    "query": query,
+                    "offlineCalories": offline.calories,
+                    "offlineProtein": offline.proteinG,
+                    "offlineSource": offline.source.rawValue,
+                ]
+            )
+            // #endregion
+        } catch {
+            // #region agent log
+            AgentDebugLog.emit(
+                hypothesisId: "B",
+                location: "FoodAnalysisService.resolveMealForLogging",
+                message: "OFF search threw",
+                data: [
+                    "query": query,
+                    "error": String(describing: error),
+                    "offlineCalories": offline.calories,
+                    "offlineProtein": offline.proteinG,
+                ]
+            )
+            // #endregion
+        }
+        return offline
+    }
+
+    static func mealPayload(from food: USDAGenericFood, userDescription: String) -> MealPayload {
+        let portion = FoodQuantity.parse(from: userDescription)
+        let totals = food.per100g.scaled(by: food.grams / 100)
+        var assumptions = [
+            "USDA \(food.dataType): \(FoodItemNaming.stripDashes(food.name)), \(Int(food.per100g.calories.rounded())) kcal / \(String(format: "%.1f", food.per100g.proteinG)) g protein per 100 g.",
+        ]
+        if food.assumedPortion {
+            assumptions.append("No amount given. Used \(food.portionLabel) (\(Int(food.grams.rounded())) g).")
+        }
+        return MealPayload(
+            name: FoodItemNaming.canonicalName(for: userDescription),
+            calories: totals.calories,
+            proteinG: totals.proteinG,
+            carbsG: totals.carbsG,
+            fatG: totals.fatG,
+            assumptions: assumptions,
+            quantity: food.quantity,
+            unit: food.unit,
+            preparationState: portion.preparation == .unknown ? nil : portion.preparation.rawValue,
+            source: .usda,
+            confidence: .medium
+        )
     }
 
     static func mealPayload(from product: BarcodeProductResult, userDescription: String) -> MealPayload {
+        let portion = FoodQuantity.parse(from: userDescription)
         let multiplier = servingMultiplier(userDescription: userDescription, product: product)
-        let calories = product.perServing.calories * multiplier
-        let protein = product.perServing.proteinG * multiplier
-        let carbs = product.perServing.carbsG * multiplier
-        let fat = product.perServing.fatG * multiplier
-        let displayName = FoodItemNaming.canonicalName(for: product.name)
+        let scaled = product.perServing.scaled(by: multiplier)
+        // Prefer the user's quantity-aware label ("3 Eggs") over a generic OFF product name.
+        let userLabel = FoodItemNaming.canonicalName(for: userDescription)
+        let displayName = hasKnownNutrition(for: userLabel)
+            ? userLabel
+            : FoodItemNaming.canonicalName(for: product.name)
         var assumption = "Open Food Facts: \(product.name)"
         if let serving = product.servingDescription, !serving.isEmpty {
             assumption += " (\(serving))"
         }
         if multiplier != 1 {
-            assumption += String(format: " — scaled ×%.2f for your portion", multiplier)
+            assumption += String(format: ". Scaled ×%.2f for your portion", multiplier)
         }
 
         return MealPayload(
             name: displayName,
-            calories: calories,
-            proteinG: protein,
-            carbsG: carbs,
-            fatG: fat,
+            calories: scaled.calories,
+            proteinG: scaled.proteinG,
+            carbsG: scaled.carbsG,
+            fatG: scaled.fatG,
             barcode: product.barcode,
             isLabelBacked: true,
-            assumptions: [assumption]
+            assumptions: [assumption],
+            quantity: portion.amount,
+            unit: portion.unit.displayName.isEmpty ? "serving" : portion.unit.displayName,
+            preparationState: portion.preparation == .unknown ? nil : portion.preparation.rawValue,
+            brand: product.brand,
+            source: .manufacturer,
+            confidence: .high
         )
     }
 
+    /// Scales OFF per-serving macros by the user's stated portion (oz, slices, counts).
     private static func servingMultiplier(userDescription: String, product: BarcodeProductResult) -> Double {
-        let sourceLower = userDescription.lowercased()
-        guard let userOz = parseFluidOunces(in: sourceLower) else { return 1 }
-        let productOz: Double
-        if let ml = product.servingQuantityMl, ml > 0 {
-            productOz = ml / 29.5735
-        } else {
-            productOz = 8
+        let portion = FoodQuantity.parse(from: userDescription)
+
+        if portion.unit == .fluidOunce || portion.unit == .milliliter || portion.unit == .cup {
+            let productOz: Double
+            if let ml = product.servingQuantityMl, ml > 0 {
+                productOz = ml / FoodUnit.mlPerFluidOunce
+            } else {
+                productOz = 8
+            }
+            let userOz = portion.unit.toMilliliters(portion.amount).map { $0 / FoodUnit.mlPerFluidOunce } ?? portion.amount
+            return max(userOz / max(productOz, 1), 0.05)
         }
-        return max(userOz / max(productOz, 1), 0.25)
+
+        if portion.unit.isMass {
+            let serving = (product.servingDescription ?? "").lowercased()
+            if let grams = FoodQuantity.parseGrams(in: serving) ?? FoodQuantity.parseOunces(in: serving).map({ $0 * FoodUnit.gramsPerOunce }) {
+                let consumedGrams = portion.unit.toGrams(portion.amount) ?? portion.amount
+                return MacroTrackingEngine.multiplier(consumed: consumedGrams, reference: grams)
+            }
+        }
+
+        guard portion.amount > 1 else { return 1 }
+
+        let serving = (product.servingDescription ?? "").lowercased()
+        let productName = product.name.lowercased()
+        let countableHints = ["slice", "egg", "piece", "unit", "each", "biscuit", "cookie", "bar"]
+        let looksPerUnit = countableHints.contains { serving.contains($0) || productName.contains($0) }
+            || hasKnownNutrition(for: userDescription)
+            || serving.isEmpty
+            || serving.contains("1 ")
+            || serving.hasPrefix("1")
+        return looksPerUnit ? portion.amount : 1
     }
 
-    /// Rough offline macro estimate from a spoken or typed food description.
-    static func estimateOffline(from description: String) -> MealPayload {
-        let source = FoodItemNaming.extractFoodReference(from: description) ?? description
-        let segments = foodSegments(from: source)
-        let lineItems = segments.map { estimateSegment($0) }
+    /// When OFF returns ~1 serving but the user said "3 eggs" / "2 slices", keep the scaled offline staple.
+    private static func shouldPreferOffline(
+        over off: MealPayload,
+        offline: MealPayload,
+        userDescription: String
+    ) -> Bool {
+        guard hasKnownNutrition(for: userDescription) else { return false }
+        let qty = Double(FoodItemNaming.parseQuantity(in: userDescription.lowercased()))
+        guard qty > 1 else { return false }
+        let offlineEntry = offline.entriesForLogging().first ?? offline
+        guard offlineEntry.calories > 0 else { return false }
+        // OFF under-counted vs offline (common when multiplier stayed at 1).
+        return off.calories < offlineEntry.calories * 0.7
+    }
 
-        if lineItems.count > 1 {
-            let totals = lineItems.reduce(into: MacroTotals()) { acc, item in
-                acc.calories += item.calories
-                acc.proteinG += item.proteinG
-                acc.carbsG += item.carbsG
-                acc.fatG += item.fatG
+    /// Fix GPT / estimate rows so quantity in the name scales macros.
+    /// Never overwrite user-provided or label/manufacturer data with a generic staple.
+    static func reconcileEstimate(_ entry: MealPayload) -> MealPayload {
+        let name = FoodItemNaming.canonicalName(for: entry.name)
+        if entry.isLabelBacked || entry.source.isExact {
+            var copy = entry
+            copy.name = name
+            return copy
+        }
+
+        if looksLikeMixedStapleDish(entry.name) || looksLikeMixedStapleDish(name) {
+            if entry.calories > 0 {
+                var copy = entry
+                copy.name = name
+                copy.confidence = .low
+                return copy
             }
+        }
+
+        let query = FoodQuantity.queryForScaling(name: entry.name, quantity: entry.quantity, unit: entry.unit)
+        if let scaled = StapleNutritionDatabase.scale(for: query)
+            ?? StapleNutritionDatabase.scale(for: entry.name)
+            ?? StapleNutritionDatabase.scale(for: name) {
+            let labeled = FoodQuantity.queryForScaling(
+                name: entry.name,
+                quantity: scaled.portion.amount,
+                unit: scaled.portion.unit.displayName.isEmpty ? nil : scaled.portion.unit.displayName
+            )
+            return payload(from: scaled, fallbackName: FoodItemNaming.canonicalName(for: labeled), barcode: entry.barcode)
+        }
+        guard hasKnownNutrition(for: name),
+              let offline = estimateForStoredName(name) else {
+            var copy = entry
+            copy.name = name
+            return copy
+        }
+        return MealPayload(
+            name: name,
+            calories: offline.calories,
+            proteinG: offline.proteinG,
+            carbsG: offline.carbsG,
+            fatG: offline.fatG,
+            barcode: entry.barcode,
+            isLabelBacked: false,
+            assumptions: offline.assumptions.isEmpty ? entry.assumptions : offline.assumptions,
+            quantity: offline.quantity,
+            unit: offline.unit,
+            preparationState: offline.preparationState,
+            brand: offline.brand,
+            source: offline.source,
+            confidence: offline.confidence
+        )
+    }
+
+    /// Reconcile a full GPT/offline payload (including multi-item line_items) before insert.
+    static func reconcileMealPayload(_ payload: MealPayload) -> MealPayload {
+        if !payload.lineItems.isEmpty {
+            let reconciledItems = payload.lineItems.map { item -> MealLineItem in
+                let asPayload = MealPayload(
+                    name: item.name,
+                    calories: item.calories,
+                    proteinG: item.proteinG,
+                    carbsG: item.carbsG,
+                    fatG: item.fatG,
+                    isLabelBacked: payload.isLabelBacked,
+                    quantity: item.quantity ?? payload.quantity,
+                    unit: item.unit ?? payload.unit,
+                    preparationState: item.preparationState ?? payload.preparationState,
+                    brand: item.brand ?? payload.brand,
+                    source: item.source.flatMap(MacroTrackingEngine.NutritionSource.init) ?? payload.source,
+                    confidence: item.confidence.flatMap(MacroTrackingEngine.NutritionConfidence.init)
+                )
+                let fixed = reconcileEstimate(asPayload)
+                return MealLineItem(
+                    name: fixed.name,
+                    calories: fixed.calories,
+                    proteinG: fixed.proteinG,
+                    carbsG: fixed.carbsG,
+                    fatG: fixed.fatG,
+                    quantity: fixed.quantity,
+                    unit: fixed.unit,
+                    preparationState: fixed.preparationState,
+                    brand: fixed.brand,
+                    source: fixed.source.rawValue,
+                    confidence: fixed.confidence.rawValue
+                )
+            }
+            let totals = MacroTrackingEngine.recipeTotals(reconciledItems.map {
+                MacroTotals(calories: $0.calories, proteinG: $0.proteinG, carbsG: $0.carbsG, fatG: $0.fatG)
+            })
             return MealPayload(
-                name: "Meal",
+                name: payload.name,
                 calories: totals.calories,
                 proteinG: totals.proteinG,
                 carbsG: totals.carbsG,
                 fatG: totals.fatG,
-                lineItems: lineItems
+                items: payload.items,
+                lineItems: reconciledItems,
+                barcode: payload.barcode,
+                isLabelBacked: payload.isLabelBacked,
+                assumptions: payload.assumptions,
+                quantity: payload.quantity,
+                unit: payload.unit,
+                preparationState: payload.preparationState,
+                brand: payload.brand,
+                source: payload.source,
+                confidence: payload.confidence
+            )
+        }
+
+        return reconcileEstimate(payload)
+    }
+
+    /// Adds foods the user named that a partial model reply left out.
+    /// "I had eggs, toast, clementines, and an apple" must not stop after eggs and toast.
+    static func completingMissingFoods(_ payload: MealPayload, from utterance: String) -> MealPayload {
+        let segments = foodSegments(from: utterance)
+        guard segments.count > 1 else { return payload }
+
+        let existing: [MealLineItem]
+        if !payload.lineItems.isEmpty {
+            existing = payload.lineItems
+        } else {
+            existing = payload.entriesForLogging().map { entry in
+                MealLineItem(
+                    name: entry.name,
+                    calories: entry.calories,
+                    proteinG: entry.proteinG,
+                    carbsG: entry.carbsG,
+                    fatG: entry.fatG,
+                    quantity: entry.quantity,
+                    unit: entry.unit,
+                    preparationState: entry.preparationState,
+                    brand: entry.brand,
+                    source: entry.source.rawValue,
+                    confidence: entry.confidence.rawValue
+                )
+            }
+        }
+
+        let missing = segments.filter { segment in
+            !existing.contains { FoodItemNaming.refersToSameFood($0.name, segment) }
+        }
+        guard !missing.isEmpty else { return payload }
+
+        let kept = existing.filter { item in
+            segments.contains { FoodItemNaming.refersToSameFood(item.name, $0) }
+        }
+        let lineItems = kept + missing.map { estimateSegment($0) }
+        let totals = MacroTrackingEngine.recipeTotals(lineItems.map {
+            MacroTotals(calories: $0.calories, proteinG: $0.proteinG, carbsG: $0.carbsG, fatG: $0.fatG)
+        })
+        return MealPayload(
+            name: lineItems.count == 1 ? lineItems[0].name : "Meal",
+            calories: totals.calories,
+            proteinG: totals.proteinG,
+            carbsG: totals.carbsG,
+            fatG: totals.fatG,
+            items: payload.items,
+            lineItems: lineItems,
+            barcode: payload.barcode,
+            isLabelBacked: payload.isLabelBacked,
+            assumptions: payload.assumptions,
+            quantity: payload.quantity,
+            unit: payload.unit,
+            preparationState: payload.preparationState,
+            brand: payload.brand,
+            source: payload.source,
+            confidence: payload.confidence
+        )
+    }
+
+    /// Stored values are the source of truth. Only repair the known plant-milk ×ounce bug.
+    static func displayMacros(
+        name: String,
+        calories: Double,
+        proteinG: Double,
+        carbsG: Double,
+        fatG: Double
+    ) -> MacroTotals {
+        if let repaired = repairedIceMacros(name: name, storedCalories: calories) {
+            return repaired
+        }
+        if let repaired = repairedPlantMilkMacros(name: name, storedCalories: calories) {
+            return repaired
+        }
+        return MacroTotals(calories: calories, proteinG: proteinG, carbsG: carbsG, fatG: fatG)
+    }
+
+    /// "Ice" logged as 200×N servings because "5 calories" was parsed as quantity 5.
+    private static func repairedIceMacros(name: String, storedCalories: Double) -> MacroTotals? {
+        guard StapleNutritionDatabase.looksLikePlainIce(name) else { return nil }
+        guard storedCalories >= 20 else { return nil }
+        return MacroTotals(calories: 0, proteinG: 0, carbsG: 0, fatG: 0)
+    }
+
+    /// Fixes carton plant-milk rows, including the old 200×ounce bug (16 oz → 3200 cal).
+    private static func repairedPlantMilkMacros(name: String, storedCalories: Double) -> MacroTotals? {
+        let lower = name.lowercased()
+        let isPlant =
+            lower.contains("coconut milk") || lower.contains("almond milk")
+            || lower.contains("oat milk") || lower.contains("soy milk") || lower.contains("soymilk")
+        guard isPlant else { return nil }
+
+        var query = name
+        // Legacy bug: parseQuantity treated "16" from "16 oz" as a count → 200×16.
+        if FoodItemNaming.parseFluidOunces(in: lower) == nil, storedCalories >= 400 {
+            let presumedOz = Int((storedCalories / 200).rounded())
+            if (2...64).contains(presumedOz) {
+                let food = FoodItemNaming.sanitizeSegment(name)
+                query = "\(presumedOz) oz \(food.isEmpty ? name : food)"
+            }
+        }
+
+        guard let entry = estimateOffline(from: query).entriesForLogging().first else { return nil }
+        return MacroTotals(
+            calories: entry.calories,
+            proteinG: entry.proteinG,
+            carbsG: entry.carbsG,
+            fatG: entry.fatG
+        )
+    }
+
+    /// Rough offline macro estimate from a spoken or typed food description.
+    static func estimateOffline(from description: String) -> MealPayload {
+        let source = FoodItemNaming.extractFoodReference(from: description)
+            ?? FoodItemNaming.loggedFoodDescription(from: description)
+            ?? FoodItemNaming.foodListForEstimation(from: description)
+        let segments = foodSegments(from: source)
+        let lineItems = segments.map { estimateSegment($0) }
+
+        if lineItems.count > 1 {
+            let totals = MacroTrackingEngine.recipeTotals(lineItems.map {
+                MacroTotals(calories: $0.calories, proteinG: $0.proteinG, carbsG: $0.carbsG, fatG: $0.fatG)
+            })
+            let lowest = lineItems.compactMap { $0.confidence.flatMap(MacroTrackingEngine.NutritionConfidence.init) }
+            let confidence: MacroTrackingEngine.NutritionConfidence = lowest.contains(.low) ? .low : (lowest.contains(.medium) ? .medium : .medium)
+            return applyUserStatedMacros(
+                MealPayload(
+                    name: "Meal",
+                    calories: totals.calories,
+                    proteinG: totals.proteinG,
+                    carbsG: totals.carbsG,
+                    fatG: totals.fatG,
+                    lineItems: lineItems,
+                    source: .genericEstimate,
+                    confidence: confidence
+                ),
+                from: description
             )
         }
 
         if let only = lineItems.first {
-            return MealPayload(
-                name: only.name,
-                calories: only.calories,
-                proteinG: only.proteinG,
-                carbsG: only.carbsG,
-                fatG: only.fatG
-            )
+            return applyUserStatedMacros(payload(from: only), from: description)
         }
 
-        return MealPayload(name: "Meal", calories: 400, proteinG: 25, carbsG: 35, fatG: 12)
+        return applyUserStatedMacros(
+            MealPayload(
+                name: "Meal",
+                calories: 400,
+                proteinG: 25,
+                carbsG: 35,
+                fatG: 12,
+                source: .genericEstimate,
+                confidence: .low
+            ),
+            from: description
+        )
+    }
+
+    /// "ice for 5 calories" must log 5 calories, not a generic 200 × 5 servings.
+    static func applyUserStatedMacros(_ payload: MealPayload, from utterance: String) -> MealPayload {
+        let stated = MacroTrackingEngine.parseUserMacros(from: utterance)
+        guard stated.hasAny else { return payload }
+
+        var copy = payload
+        func overlay(_ calories: Double, proteinG: Double, carbsG: Double, fatG: Double) -> (Double, Double, Double, Double) {
+            var cal = calories
+            var protein = proteinG
+            var carbs = carbsG
+            var fat = fatG
+            if let statedCal = stated.calories {
+                if stated.proteinG == nil, stated.carbsG == nil, stated.fatG == nil, calories > 1 {
+                    let factor = statedCal / calories
+                    protein *= factor
+                    carbs *= factor
+                    fat *= factor
+                }
+                cal = statedCal
+            }
+            if let value = stated.proteinG { protein = value }
+            if let value = stated.carbsG { carbs = value }
+            if let value = stated.fatG { fat = value }
+            return (cal, protein, carbs, fat)
+        }
+
+        if copy.lineItems.count == 1, var item = copy.lineItems.first {
+            let macros = overlay(item.calories, proteinG: item.proteinG, carbsG: item.carbsG, fatG: item.fatG)
+            item.calories = macros.0
+            item.proteinG = macros.1
+            item.carbsG = macros.2
+            item.fatG = macros.3
+            item.source = MacroTrackingEngine.NutritionSource.userProvided.rawValue
+            item.confidence = MacroTrackingEngine.NutritionConfidence.high.rawValue
+            copy.lineItems = [item]
+            copy.calories = item.calories
+            copy.proteinG = item.proteinG
+            copy.carbsG = item.carbsG
+            copy.fatG = item.fatG
+        } else {
+            let macros = overlay(copy.calories, proteinG: copy.proteinG, carbsG: copy.carbsG, fatG: copy.fatG)
+            copy.calories = macros.0
+            copy.proteinG = macros.1
+            copy.carbsG = macros.2
+            copy.fatG = macros.3
+        }
+        copy.source = .userProvided
+        copy.confidence = .high
+        return copy
     }
 
     /// Re-estimate macros for a stored log label (USDA-based offline lookup).
@@ -141,123 +813,203 @@ enum FoodAnalysisService {
         return estimate.entriesForLogging().first
     }
 
-    /// Whether offline USDA-based estimates exist for this label.
+    /// Whether a local staple or USDA-style entry exists for this label.
     static func hasKnownNutrition(for name: String) -> Bool {
+        if StapleNutritionDatabase.match(in: name) != nil { return true }
         let text = name.lowercased()
         let sanitized = FoodItemNaming.sanitizeSegment(name).lowercased()
         let known = [
-            "carrot", "ground beef", "egg", "almond butter", "peanut butter",
-            "toast", "bread", "dave", "chicken", "salmon", "fish", "yogurt", "greek",
-            "rice", "salad", "big mac", "bigmac", "burger", "pizza", "mcdonald",
+            "sandwich", "salad", "burger", "pizza", "mcdonald",
             "power green", "powder green", "twix", "candy", "chocolate bar",
-            "chocolate milk", "nesquik",
         ]
         return known.contains { text.contains($0) || sanitized.contains($0) }
     }
 
-    private static func foodSegments(from description: String) -> [String] {
-        let text = FoodItemNaming.sanitizeUtterance(description)
+    /// Whole-token match so "chip" does not hit "chipotle".
+    private static func matchesFoodToken(_ text: String, _ token: String) -> Bool {
+        guard let regex = try? NSRegularExpression(
+            pattern: "\\b\(NSRegularExpression.escapedPattern(for: token))\\b",
+            options: .caseInsensitive
+        ) else {
+            return false
+        }
+        return regex.firstMatch(in: text, range: NSRange(text.startIndex..<text.endIndex, in: text)) != nil
+    }
 
-        let parts = text
-            .replacingOccurrences(of: " & ", with: ", ")
-            .replacingOccurrences(of: " and ", with: ",", options: .caseInsensitive)
+    /// Splits multi-food utterances joined by commas, "and", "plus", "+", or ";".
+    private static func foodSegments(from description: String) -> [String] {
+        let text = FoodItemNaming.foodListForEstimation(from: description)
+
+        var normalized = text
+        let replacements: [(String, String)] = [
+            (#"\s*&\s*"#, ", "),
+            (#"\s*\+\s*"#, ", "),
+            (#"\s*;\s*"#, ", "),
+            (#"\.\s+"#, ", "),
+            (#"\s+plus\s+"#, ", "),
+            (#"\s+and\s+"#, ", "),
+            (#"\s+with\s+"#, ", "),
+        ]
+        for (pattern, replacement) in replacements {
+            guard let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive) else { continue }
+            let range = NSRange(normalized.startIndex..<normalized.endIndex, in: normalized)
+            normalized = regex.stringByReplacingMatches(in: normalized, range: range, withTemplate: replacement)
+        }
+
+        let parts = normalized
             .split(separator: ",")
-            .map { FoodItemNaming.sanitizeSegment(String($0)) }
-            .filter { !$0.isEmpty }
+            .map { part -> String in
+                var s = String(part).trimmingCharacters(in: .whitespacesAndNewlines)
+                s = s.trimmingCharacters(in: CharacterSet(charactersIn: ".,!;:"))
+                return s.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            .filter { part in
+                !part.isEmpty && !FoodItemNaming.sanitizeSegment(part).isEmpty
+            }
 
         return parts.isEmpty ? [text] : parts
     }
 
     private static func estimateSegment(_ segment: String) -> MealLineItem {
         let sourceLower = segment.lowercased()
-        let text = FoodItemNaming.sanitizeSegment(segment).lowercased()
-        let qty = Double(FoodItemNaming.parseQuantity(in: sourceLower))
-        let name = FoodItemNaming.logLabel(from: segment, quantity: qty)
+        let portion = FoodQuantity.parse(from: segment)
+        let name = FoodItemNaming.logLabel(from: segment, quantity: portion.amount)
 
-        if text.contains("egg") {
-            return macrosItem(name: name, perUnit: (70, 6, 0.5, 5), quantity: qty)
+        if sourceLower.contains("sandwich") {
+            return genericItem(name: name, calories: 450, proteinG: 28, carbsG: 40, fatG: 18, quantity: max(portion.amount, 1), confidence: .low)
         }
-        if text.contains("almond butter") || text.contains("peanut butter") {
-            let tbsp = text.contains("tablespoon") || text.contains("tbsp") ? max(qty, 1) : max(qty, 1)
-            return MealLineItem(name: name, calories: 98 * tbsp, proteinG: 3 * tbsp, carbsG: 3 * tbsp, fatG: 9 * tbsp)
+        if let scaled = StapleNutritionDatabase.scale(for: segment) {
+            return lineItem(from: scaled, name: name)
         }
-        if text.contains("toast") || text.contains("bread") || text.contains("dave") {
-            let slices = text.contains("loaf") ? max(qty, 1) : max(qty, 1)
-            return macrosItem(name: name, perUnit: (60, 3, 11, 1), quantity: slices)
+        if sourceLower.contains("salad") {
+            return genericItem(name: name, calories: 320, proteinG: 28, carbsG: 18, fatG: 14, quantity: max(portion.amount, 1), confidence: .low)
         }
-        if text.contains("chicken") {
-            return macrosItem(name: name, perUnit: (165, 31, 0, 4), quantity: max(qty, 1))
+        if sourceLower.contains("burger") || sourceLower.contains("pizza") || sourceLower.contains("mcdonald") {
+            return genericItem(
+                name: name,
+                calories: 650,
+                proteinG: 28,
+                carbsG: 55,
+                fatG: 32,
+                quantity: max(portion.amount, 1),
+                confidence: .low
+            )
         }
-        if text.contains("salmon") || text.contains("fish") {
-            return macrosItem(name: name, perUnit: (200, 34, 0, 7), quantity: max(qty, 1))
+        if sourceLower.contains("power green") || sourceLower.contains("powder green") {
+            return genericItem(name: name, calories: 450, proteinG: 28, carbsG: 45, fatG: 18, quantity: 1, confidence: .low)
         }
-        if text.contains("yogurt") || text.contains("greek") {
-            return macrosItem(name: name, perUnit: (100, 17, 6, 0), quantity: max(qty, 1))
+        if sourceLower.contains("twix") || sourceLower.contains("candy") || sourceLower.contains("chocolate bar") {
+            return genericItem(name: name, calories: 250, proteinG: 2, carbsG: 34, fatG: 12, quantity: max(portion.amount, 1), confidence: .low)
         }
-        if text.contains("rice") {
-            return macrosItem(name: name, perUnit: (200, 4, 44, 0), quantity: max(qty, 1))
-        }
-        if text.contains("salad") {
-            return MealLineItem(name: name, calories: 320, proteinG: 28, carbsG: 18, fatG: 14)
-        }
-        if text.contains("big mac") || text.contains("bigmac") {
-            return macrosItem(name: name, perUnit: (590, 25, 46, 34), quantity: qty)
-        }
-        if text.contains("burger") || text.contains("pizza") || text.contains("mcdonald") {
-            return MealLineItem(name: name, calories: 650, proteinG: 28, carbsG: 55, fatG: 32)
-        }
-        if text.contains("power green") || text.contains("powder green") {
-            return MealLineItem(name: name, calories: 450, proteinG: 28, carbsG: 45, fatG: 18)
-        }
-        if text.contains("carrot") || sourceLower.contains("carrot") {
-            if sourceLower.contains("cup") {
-                // USDA FDC: carrots, raw — 1 cup chopped (128g)
-                return macrosItem(name: name, perUnit: (52, 1.2, 12.3, 0.3), quantity: max(qty, 1))
-            }
-            // USDA FDC: 1 medium carrot (61g)
-            return macrosItem(name: name, perUnit: (25, 0.6, 6, 0.1), quantity: max(qty, 1))
-        }
-        if text.contains("ground beef") || sourceLower.contains("ground beef") {
-            // USDA FDC: ground beef, cooked — 1 cup crumbled
-            let cups = sourceLower.contains("cup") ? max(qty, 1) : 1
-            return macrosItem(name: name, perUnit: (339, 31, 0, 23), quantity: cups)
-        }
-        if let chocolateMilk = estimateChocolateMilk(name: name, sourceLower: sourceLower) {
-            return chocolateMilk
-        }
-        if text.contains("twix") || text.contains("candy") || text.contains("chocolate bar") {
-            return MealLineItem(name: name, calories: 250, proteinG: 2, carbsG: 34, fatG: 12)
-        }
-        if isCoffeeDrink(text) || sourceLower.contains("starbucks") {
-            return estimateCoffeeDrink(name: name, text: text, sourceLower: sourceLower, quantity: qty)
+        if isCoffeeDrink(FoodItemNaming.sanitizeSegment(segment).lowercased()) || sourceLower.contains("starbucks") {
+            let drinkQty = portion.unit.isVolume ? 1 : max(portion.amount, 1)
+            return estimateCoffeeDrink(name: name, text: sourceLower, sourceLower: sourceLower, quantity: drinkQty)
         }
 
-        let q = max(qty, 1)
-        return MealLineItem(name: name, calories: 200 * q, proteinG: 10 * q, carbsG: 15, fatG: 8)
+        if portion.unit.isVolume {
+            let cups = portion.unit.toMilliliters(portion.amount).map { max($0 / FoodUnit.mlPerCup, 0.25) } ?? max(portion.amount, 0.25)
+            return genericItem(name: name, calories: 50, proteinG: 1, carbsG: 4, fatG: 2.5, quantity: cups, unit: "cup", confidence: .low)
+        }
+
+        // #region agent log
+        AgentDebugLog.emit(
+            hypothesisId: "A",
+            location: "FoodAnalysisService.estimateSegment",
+            message: "generic 200/10 fallback",
+            data: [
+                "segment": segment,
+                "name": name,
+                "portionAmount": portion.amount,
+                "portionUnit": String(describing: portion.unit),
+                "stapleMatch": StapleNutritionDatabase.match(in: segment) != nil,
+            ]
+        )
+        // #endregion
+        return genericItem(
+            name: name,
+            calories: 200,
+            proteinG: 10,
+            carbsG: 15,
+            fatG: 8,
+            quantity: max(portion.amount, 1),
+            unit: portion.unit.displayName.isEmpty ? "serving" : portion.unit.displayName,
+            confidence: .low
+        )
     }
 
-    /// Nesquik / ready-to-drink chocolate milk — 8 fl oz ≈ 140 cal (label reference).
-    private static func estimateChocolateMilk(name: String, sourceLower: String) -> MealLineItem? {
-        let isChocolateMilk =
-            sourceLower.contains("chocolate milk")
-            || sourceLower.contains("nesquik")
-            || (sourceLower.contains("chocolate") && sourceLower.contains("milk") && !sourceLower.contains("bar"))
-        guard isChocolateMilk else { return nil }
-
-        let oz = parseFluidOunces(in: sourceLower) ?? 8
-        let servings = max(oz / 8, 0.25)
-        return macrosItem(name: name, perUnit: (140, 5, 24, 2.5), quantity: servings)
+    private static func payload(from scaled: StapleNutritionDatabase.ScaledResult, fallbackName: String, barcode: String?) -> MealPayload {
+        MealPayload(
+            name: fallbackName,
+            calories: scaled.totals.calories,
+            proteinG: scaled.totals.proteinG,
+            carbsG: scaled.totals.carbsG,
+            fatG: scaled.totals.fatG,
+            barcode: barcode ?? scaled.entry.barcode,
+            isLabelBacked: scaled.entry.source.isExact,
+            assumptions: scaled.assumptions,
+            quantity: scaled.portion.amount,
+            unit: scaled.portion.unit.displayName.isEmpty ? scaled.entry.displayUnit : scaled.portion.unit.displayName,
+            preparationState: scaled.portion.preparation == .unknown ? nil : scaled.portion.preparation.rawValue,
+            brand: scaled.entry.brand,
+            source: scaled.entry.source,
+            confidence: scaled.usedDefaultPortion ? .low : (scaled.inferredPreparation ? .medium : scaled.entry.confidence)
+        )
     }
 
-    /// Parses "8 oz", "8 fl oz", etc. Returns nil if no fluid measure found.
-    private static func parseFluidOunces(in text: String) -> Double? {
-        let lower = text.lowercased()
-        let pattern = #"(\d+(?:\.\d+)?)\s*(?:fl\s*oz|fluid\s*ounces?|ounces?|oz)\b"#
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive),
-              let match = regex.firstMatch(in: lower, range: NSRange(lower.startIndex..., in: lower)),
-              let range = Range(match.range(at: 1), in: lower),
-              let value = Double(lower[range]) else { return nil }
-        return value
+    private static func payload(from item: MealLineItem) -> MealPayload {
+        MealPayload(
+            name: item.name,
+            calories: item.calories,
+            proteinG: item.proteinG,
+            carbsG: item.carbsG,
+            fatG: item.fatG,
+            quantity: item.quantity ?? 1,
+            unit: item.unit ?? "serving",
+            preparationState: item.preparationState,
+            brand: item.brand,
+            source: item.source.flatMap(MacroTrackingEngine.NutritionSource.init) ?? .genericEstimate,
+            confidence: item.confidence.flatMap(MacroTrackingEngine.NutritionConfidence.init)
+        )
+    }
+
+    private static func lineItem(from scaled: StapleNutritionDatabase.ScaledResult, name: String) -> MealLineItem {
+        MealLineItem(
+            name: name,
+            calories: scaled.totals.calories,
+            proteinG: scaled.totals.proteinG,
+            carbsG: scaled.totals.carbsG,
+            fatG: scaled.totals.fatG,
+            quantity: scaled.portion.amount,
+            unit: scaled.portion.unit.displayName.isEmpty ? scaled.entry.displayUnit : scaled.portion.unit.displayName,
+            preparationState: scaled.portion.preparation == .unknown ? nil : scaled.portion.preparation.rawValue,
+            brand: scaled.entry.brand,
+            source: scaled.entry.source.rawValue,
+            confidence: (scaled.usedDefaultPortion ? MacroTrackingEngine.NutritionConfidence.low : (scaled.inferredPreparation ? MacroTrackingEngine.NutritionConfidence.medium : scaled.entry.confidence)).rawValue
+        )
+    }
+
+    private static func genericItem(
+        name: String,
+        calories: Double,
+        proteinG: Double,
+        carbsG: Double,
+        fatG: Double,
+        quantity: Double,
+        unit: String = "serving",
+        confidence: MacroTrackingEngine.NutritionConfidence
+    ) -> MealLineItem {
+        let q = max(quantity, 0.05)
+        return MealLineItem(
+            name: name,
+            calories: calories * q,
+            proteinG: proteinG * q,
+            carbsG: carbsG * q,
+            fatG: fatG * q,
+            quantity: q,
+            unit: unit,
+            source: MacroTrackingEngine.NutritionSource.genericEstimate.rawValue,
+            confidence: confidence.rawValue
+        )
     }
 
     private static func isCoffeeDrink(_ text: String) -> Bool {
@@ -293,23 +1045,194 @@ enum FoodAnalysisService {
             calories: cal * sizeMultiplier * q,
             proteinG: protein * q,
             carbsG: carbs * sizeMultiplier * q,
-            fatG: fat * sizeMultiplier * q
+            fatG: fat * sizeMultiplier * q,
+            quantity: q,
+            unit: "serving",
+            source: MacroTrackingEngine.NutritionSource.genericEstimate.rawValue,
+            confidence: MacroTrackingEngine.NutritionConfidence.low.rawValue
         )
     }
 
-    private static func macrosItem(
-        name: String,
-        perUnit: (Double, Double, Double, Double),
-        quantity: Double
-    ) -> MealLineItem {
-        let q = max(quantity, 1)
-        return MealLineItem(
-            name: name,
-            calories: perUnit.0 * q,
-            proteinG: perUnit.1 * q,
-            carbsG: perUnit.2 * q,
-            fatG: perUnit.3 * q
+    /// Plate photo → structured inventory → staple/label math. GPT macros are fallback only.
+    static func resolvedMeal(fromPhotoAnalysis result: FoodAnalysisResult) -> MealPayload {
+        if isExactPhotoSource(result) {
+            return labelBackedPhotoPayload(from: result)
+        }
+
+        let aiFallback = result.aiFallbackTotals
+        var lineItems = result.lineItems
+        if lineItems.isEmpty {
+            lineItems = result.items
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+                .map { name in
+                    MealLineItem(
+                        name: name,
+                        calories: 0,
+                        proteinG: 0,
+                        carbsG: 0,
+                        fatG: 0,
+                        source: MacroTrackingEngine.NutritionSource.genericEstimate.rawValue,
+                        confidence: MacroTrackingEngine.NutritionConfidence.low.rawValue
+                    )
+                }
+        }
+        if lineItems.isEmpty {
+            lineItems = [
+                MealLineItem(
+                    name: "Meal",
+                    calories: result.calories,
+                    proteinG: result.proteinG,
+                    carbsG: result.carbsG,
+                    fatG: result.fatG,
+                    source: MacroTrackingEngine.NutritionSource.genericEstimate.rawValue,
+                    confidence: MacroTrackingEngine.NutritionConfidence.low.rawValue
+                ),
+            ]
+        }
+
+        var assumptions = result.assumptions
+        if aiFallback.calories > 0 || aiFallback.proteinG > 0 {
+            assumptions.append(aiFallbackAssumption(aiFallback))
+        }
+
+        let payload = MealPayload(
+            name: lineItems.count == 1 ? lineItems[0].name : "Meal",
+            calories: result.calories,
+            proteinG: result.proteinG,
+            carbsG: result.carbsG,
+            fatG: result.fatG,
+            items: result.items,
+            lineItems: lineItems,
+            barcode: result.barcode,
+            isLabelBacked: false,
+            assumptions: assumptions,
+            source: .genericEstimate,
+            confidence: .low
         )
+        var reconciled = reconcileMealPayload(payload)
+        if reconciled.calories <= 0, aiFallback.calories > 0 {
+            reconciled.calories = aiFallback.calories
+            reconciled.proteinG = aiFallback.proteinG
+            reconciled.carbsG = aiFallback.carbsG
+            reconciled.fatG = aiFallback.fatG
+            reconciled.assumptions.append("Used AI fallback macros because no staple matched.")
+        }
+        logNutritionResolution(reconciled, aiFallback: aiFallback)
+        return reconciled
+    }
+
+    static func userFacingTotals(from payload: MealPayload) -> MacroTotals {
+        totals(from: payload)
+    }
+
+    static func formatEstimateForDisplay(
+        _ value: Double,
+        isCalories: Bool,
+        confidence: MacroTrackingEngine.NutritionConfidence
+    ) -> String {
+        if confidence == .high {
+            let rounded = value.rounded()
+            if abs(value - rounded) < 0.05 {
+                return String(Int(rounded))
+            }
+            return String(format: "%.1f", value)
+        }
+        if isCalories {
+            return String(Int((value / 10.0).rounded() * 10))
+        }
+        return String(Int(value.rounded()))
+    }
+
+    private static func isExactPhotoSource(_ result: FoodAnalysisResult) -> Bool {
+        if result.source == .barcode || result.source == .nutritionLabelOCR { return true }
+        return result.labelDetected == true
+    }
+
+    private static func labelBackedPhotoPayload(from result: FoodAnalysisResult) -> MealPayload {
+        let source: MacroTrackingEngine.NutritionSource = result.source == .barcode ? .manufacturer : .userLabel
+        let rawName = result.items.first ?? "Packaged food"
+        // "Potato Chips Jalapeño" must stay the product, not collapse to "1 serving chips".
+        let name = result.barcode == nil ? FoodItemNaming.canonicalName(for: rawName) : rawName
+        return MealPayload(
+            name: name,
+            calories: result.calories,
+            proteinG: result.proteinG,
+            carbsG: result.carbsG,
+            fatG: result.fatG,
+            items: result.items,
+            barcode: result.barcode,
+            isLabelBacked: true,
+            assumptions: result.assumptions,
+            source: source,
+            confidence: .high
+        )
+    }
+
+    private static func totals(from payload: MealPayload) -> MacroTotals {
+        let entries = payload.entriesForLogging()
+        return MacroTrackingEngine.recipeTotals(entries.map {
+            MacroTotals(calories: $0.calories, proteinG: $0.proteinG, carbsG: $0.carbsG, fatG: $0.fatG)
+        })
+    }
+
+    private static func aiFallbackAssumption(_ totals: MacroTotals) -> String {
+        "AI fallback estimate: \(Int(totals.calories.rounded())) kcal / \(Int(totals.proteinG.rounded()))g protein (not used when a staple matched)."
+    }
+
+    private static func looksLikeMixedStapleDish(_ name: String) -> Bool {
+        distinctStapleGroups(in: name).count >= 2
+    }
+
+    private static func distinctStapleGroups(in name: String) -> Set<String> {
+        let lower = name.lowercased()
+        var groups: Set<String> = []
+        let mapping: [(String, [String])] = [
+            ("chicken", ["chicken"]),
+            ("rice", ["rice"]),
+            ("egg", ["egg", "eggs"]),
+            ("beef", ["ground beef", "beef"]),
+            ("fish", ["salmon", "fish"]),
+            ("oil", ["olive oil", "oil"]),
+            ("butter", ["butter"]),
+            ("yogurt", ["yogurt"]),
+            ("banana", ["banana"]),
+        ]
+        for (group, tokens) in mapping {
+            if tokens.contains(where: { token in
+                guard let regex = try? NSRegularExpression(
+                    pattern: "\\b\(NSRegularExpression.escapedPattern(for: token))\\b",
+                    options: .caseInsensitive
+                ) else { return false }
+                return regex.firstMatch(in: lower, range: NSRange(lower.startIndex..., in: lower)) != nil
+            }) {
+                groups.insert(group)
+            }
+        }
+        return groups
+    }
+
+    private static func logNutritionResolution(_ payload: MealPayload, aiFallback: MacroTotals) {
+        #if DEBUG
+        let entries = payload.entriesForLogging()
+        var lines: [String] = ["Photo nutrition resolution"]
+        for entry in entries {
+            lines.append(
+                """
+                Food: \(entry.name)
+                Vision portion: \(entry.quantity) \(entry.unit)
+                Preparation: \(entry.preparationState ?? "unknown")
+                Nutrition source: \(entry.source.rawValue)
+                Calories: \(entry.calories)
+                Protein: \(entry.proteinG) g
+                Confidence: \(entry.confidence.rawValue)
+                Assumptions: \(entry.assumptions.joined(separator: "; "))
+                AI fallback estimate: \(aiFallback.calories) kcal / \(aiFallback.proteinG)g protein
+                """
+            )
+        }
+        Logger(subsystem: "FunFitnessTrainer", category: "nutrition").debug("\(lines.joined(separator: "\n---\n"), privacy: .public)")
+        #endif
     }
 
     private static func mockResult() -> FoodAnalysisResult {
@@ -320,8 +1243,10 @@ enum FoodAnalysisService {
             fatG: 18,
             items: ["sample meal"],
             confidence: 0.5,
-            assumptions: ["Demo mode — configure Supabase for real estimates"],
-            labelDetected: false
+            assumptions: ["Demo mode. Configure Supabase for real estimates"],
+            labelDetected: false,
+            barcode: nil,
+            source: .offlineEstimate
         )
     }
 }
@@ -334,19 +1259,115 @@ extension FoodAnalysisService {
     }
 }
 
-private extension UIImage {
+enum AgentDebugLog {
+    private static let sessionId = "df7d56"
+    private static let logPath = "/Users/lukeeidsvold/Social Media Guru/exports/Fun Fitness Trainer/.cursor/debug-df7d56.log"
+    private static let endpoints = [
+        "http://127.0.0.1:7417/ingest/1f1eb15b-5e96-4046-891c-3aaf57988060",
+        "http://192.168.1.39:7417/ingest/1f1eb15b-5e96-4046-891c-3aaf57988060",
+    ]
+
+    static func emit(hypothesisId: String, location: String, message: String, data: [String: Any] = [:]) {
+        let payload: [String: Any] = [
+            "sessionId": sessionId,
+            "runId": "pre-fix",
+            "hypothesisId": hypothesisId,
+            "location": location,
+            "message": message,
+            "data": data,
+            "timestamp": Int(Date().timeIntervalSince1970 * 1000),
+        ]
+        guard let json = try? JSONSerialization.data(withJSONObject: payload) else { return }
+
+        // Simulator / Mac can write the workspace log directly.
+        if !FileManager.default.fileExists(atPath: logPath) {
+            FileManager.default.createFile(atPath: logPath, contents: nil)
+        }
+        if let handle = FileHandle(forWritingAtPath: logPath) {
+            defer { try? handle.close() }
+            handle.seekToEndOfFile()
+            if var line = String(data: json, encoding: .utf8) {
+                line += "\n"
+                if let bytes = line.data(using: .utf8) {
+                    handle.write(bytes)
+                }
+            }
+        }
+
+        // Physical device reaches the Mac ingest over LAN (NSAllowsLocalNetworking).
+        for endpoint in endpoints {
+            guard let url = URL(string: endpoint) else { continue }
+            var request = URLRequest(url: url)
+            request.httpMethod = "POST"
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.setValue(sessionId, forHTTPHeaderField: "X-Debug-Session-Id")
+            request.httpBody = json
+            URLSession.shared.dataTask(with: request).resume()
+        }
+
+        #if DEBUG
+        print("[AgentDebugLog] \(hypothesisId) \(location): \(message) \(data)")
+        #endif
+    }
+
+    static func flush() async {}
+}
+
+private enum FoodAnalysisNetwork {
+    static let monitor: NWPathMonitor = {
+        let monitor = NWPathMonitor()
+        monitor.start(queue: DispatchQueue(label: "funfitness.food.network"))
+        return monitor
+    }()
+
+    static var isLikelyAvailable: Bool {
+        monitor.currentPath.status != .unsatisfied
+    }
+}
+
+extension UIImage {
+    /// Pixel-aware resize + iterative JPEG compression for vision uploads / meal photo storage.
+    func jpegDataForFoodAnalysis(maxBytes: Int = 250_000, maxEdge: CGFloat = 1024) -> Data? {
+        var image = preparedForFoodAnalysis(maxEdge: maxEdge)
+        var quality: CGFloat = 0.78
+
+        for _ in 0..<6 {
+            if let data = image.jpegData(compressionQuality: quality), data.count <= maxBytes {
+                return data
+            }
+            quality -= 0.08
+            if quality < 0.38 {
+                image = image.preparedForFoodAnalysis(maxEdge: max(image.pixelLongestEdge * 0.8, 720))
+                quality = 0.62
+            }
+        }
+        return image.jpegData(compressionQuality: 0.42)
+    }
+
     /// Keeps label text legible for vision models without oversized uploads.
-    func preparedForFoodAnalysis() -> UIImage {
-        let maxEdge: CGFloat = 1280
-        let longest = max(size.width, size.height)
-        guard longest > maxEdge else { return self }
+    fileprivate func preparedForFoodAnalysis(maxEdge: CGFloat = 1024) -> UIImage {
+        let longest = pixelLongestEdge
+        guard longest > maxEdge else {
+            // Normalize orientation into a scale=1 bitmap so jpeg size matches expectations.
+            guard imageOrientation != .up else { return self }
+            let format = UIGraphicsImageRendererFormat()
+            format.scale = 1
+            let drawSize = CGSize(width: size.width, height: size.height)
+            return UIGraphicsImageRenderer(size: drawSize, format: format).image { _ in
+                draw(in: CGRect(origin: .zero, size: drawSize))
+            }
+        }
 
         let scale = maxEdge / longest
-        let newSize = CGSize(width: size.width * scale, height: size.height * scale)
+        let newSize = CGSize(width: size.width * self.scale * scale, height: size.height * self.scale * scale)
         let format = UIGraphicsImageRendererFormat()
         format.scale = 1
         return UIGraphicsImageRenderer(size: newSize, format: format).image { _ in
             draw(in: CGRect(origin: .zero, size: newSize))
         }
+    }
+
+    fileprivate var pixelLongestEdge: CGFloat {
+        max(size.width * scale, size.height * scale)
     }
 }

@@ -1,0 +1,937 @@
+import Foundation
+
+/// Local branded / USDA-style reference foods.
+/// Values are **per reference quantity**. Callers scale with `FoodQuantity.multiplier`.
+enum StapleNutritionDatabase {
+    struct Entry: Equatable {
+        let key: String
+        let aliases: [String]
+        let displayName: String
+        let brand: String?
+        let displayUnit: String
+        let referenceQuantity: Double
+        let referenceUnit: FoodUnit
+        let preparation: MacroTrackingEngine.PreparationState
+        let calories: Double
+        let proteinG: Double
+        let carbsG: Double
+        let fatG: Double
+        let source: MacroTrackingEngine.NutritionSource
+        let confidence: MacroTrackingEngine.NutritionConfidence
+        let barcode: String?
+        let notes: String
+        /// Used only when the user/vision said "chicken" with no weight. Never 1 count / 100g.
+        var defaultLoggedPortion: FoodPortion? = nil
+
+        var perReference: MacroTotals {
+            MacroTotals(calories: calories, proteinG: proteinG, carbsG: carbsG, fatG: fatG)
+        }
+
+        var isBranded: Bool { brand != nil }
+    }
+
+    struct ScaledResult {
+        let entry: Entry
+        let portion: FoodPortion
+        let multiplier: Double
+        let totals: MacroTotals
+        let inferredPreparation: Bool
+        let usedDefaultPortion: Bool
+        let assumptions: [String]
+    }
+
+    // MARK: - Branded
+
+    static let davesKillerBread21WholeGrains = Entry(
+        key: "daves_21_whole_grains",
+        aliases: ["dave's", "daves", "dave’s killer", "21 whole grains"],
+        displayName: "Dave's Killer Bread",
+        brand: "Dave's Killer Bread",
+        displayUnit: "slice",
+        referenceQuantity: 1,
+        referenceUnit: .slice,
+        preparation: .unknown,
+        calories: 110,
+        proteinG: 5,
+        carbsG: 22,
+        fatG: 1.5,
+        source: .manufacturer,
+        confidence: .high,
+        barcode: "013764005043",
+        notes: "Dave's Killer Bread label · 21 Whole Grains & Seeds (1 slice / 45g)"
+    )
+
+    static let davesThinSliced = Entry(
+        key: "daves_thin_sliced",
+        aliases: ["dave's thin", "daves thin", "thin-sliced", "thin sliced"],
+        displayName: "Dave's Thin Sliced",
+        brand: "Dave's Killer Bread",
+        displayUnit: "slice",
+        referenceQuantity: 1,
+        referenceUnit: .slice,
+        preparation: .unknown,
+        calories: 60,
+        proteinG: 3,
+        carbsG: 11,
+        fatG: 1,
+        source: .manufacturer,
+        confidence: .high,
+        barcode: nil,
+        notes: "Dave's Killer Bread Thin-Sliced label"
+    )
+
+    // MARK: - USDA-style staples
+
+    static let largeEgg = Entry(
+        key: "large_egg",
+        aliases: ["egg", "eggs"],
+        displayName: "Large egg",
+        brand: nil,
+        displayUnit: "egg",
+        referenceQuantity: 1,
+        referenceUnit: .count,
+        preparation: .unknown,
+        calories: 72,
+        proteinG: 6.3,
+        carbsG: 0.4,
+        fatG: 4.8,
+        source: .usda,
+        confidence: .medium,
+        barcode: nil,
+        notes: "USDA large egg"
+    )
+
+    static let genericToastSlice = Entry(
+        key: "generic_toast",
+        aliases: ["toast", "bread", "sandwich bread"],
+        displayName: "Toast",
+        brand: nil,
+        displayUnit: "slice",
+        referenceQuantity: 1,
+        referenceUnit: .slice,
+        preparation: .unknown,
+        calories: 80,
+        proteinG: 3,
+        carbsG: 15,
+        fatG: 1,
+        source: .usda,
+        confidence: .medium,
+        barcode: nil,
+        notes: "Generic sandwich bread slice"
+    )
+
+    static let sourdoughSlice = Entry(
+        key: "sourdough_slice",
+        aliases: ["sourdough"],
+        displayName: "Sourdough",
+        brand: nil,
+        displayUnit: "slice",
+        referenceQuantity: 1,
+        referenceUnit: .slice,
+        preparation: .unknown,
+        calories: 90,
+        proteinG: 4,
+        carbsG: 17,
+        fatG: 1,
+        source: .usda,
+        confidence: .medium,
+        barcode: nil,
+        notes: "USDA-style sourdough slice (~50g)"
+    )
+
+    /// Cooked skinless chicken breast — USDA per 100 g. 6 oz ≈ 280 kcal / 53 g protein.
+    static let chickenBreastCooked = Entry(
+        key: "chicken_breast_cooked",
+        aliases: ["chicken breast", "chicken"],
+        displayName: "Cooked chicken breast",
+        brand: nil,
+        displayUnit: "g",
+        referenceQuantity: 100,
+        referenceUnit: .gram,
+        preparation: .cooked,
+        calories: 165,
+        proteinG: 31,
+        carbsG: 0,
+        fatG: 3.6,
+        source: .usda,
+        confidence: .medium,
+        barcode: nil,
+        notes: "USDA chicken breast, cooked, skinless, per 100g",
+        defaultLoggedPortion: FoodPortion(amount: 6, unit: .ounce, preparation: .cooked)
+    )
+
+    static let chickenBreastRaw = Entry(
+        key: "chicken_breast_raw",
+        aliases: ["chicken breast", "chicken"],
+        displayName: "Raw chicken breast",
+        brand: nil,
+        displayUnit: "g",
+        referenceQuantity: 100,
+        referenceUnit: .gram,
+        preparation: .raw,
+        calories: 120,
+        proteinG: 22.5,
+        carbsG: 0,
+        fatG: 2.6,
+        source: .usda,
+        confidence: .medium,
+        barcode: nil,
+        notes: "USDA chicken breast, raw, skinless, per 100g",
+        defaultLoggedPortion: FoodPortion(amount: 6, unit: .ounce, preparation: .raw)
+    )
+
+    static let groundBeefCooked = Entry(
+        key: "ground_beef_cooked",
+        aliases: ["ground beef", "hamburger meat"],
+        displayName: "Cooked ground beef",
+        brand: nil,
+        displayUnit: "g",
+        referenceQuantity: 100,
+        referenceUnit: .gram,
+        preparation: .cooked,
+        calories: 250,
+        proteinG: 26,
+        carbsG: 0,
+        fatG: 15,
+        source: .usda,
+        confidence: .medium,
+        barcode: nil,
+        notes: "USDA 80/20 ground beef, cooked, per 100g",
+        defaultLoggedPortion: FoodPortion(amount: 6, unit: .ounce, preparation: .cooked)
+    )
+
+    static let groundBeefCookedCup = Entry(
+        key: "ground_beef_cooked_cup",
+        aliases: ["ground beef"],
+        displayName: "Cooked ground beef",
+        brand: nil,
+        displayUnit: "cup",
+        referenceQuantity: 1,
+        referenceUnit: .cup,
+        preparation: .cooked,
+        calories: 339,
+        proteinG: 31,
+        carbsG: 0,
+        fatG: 23,
+        source: .usda,
+        confidence: .medium,
+        barcode: nil,
+        notes: "USDA ground beef, cooked — 1 cup crumbled"
+    )
+
+    static let salmonCooked = Entry(
+        key: "salmon_cooked",
+        aliases: ["salmon", "fish"],
+        displayName: "Cooked salmon",
+        brand: nil,
+        displayUnit: "g",
+        referenceQuantity: 100,
+        referenceUnit: .gram,
+        preparation: .cooked,
+        calories: 206,
+        proteinG: 22,
+        carbsG: 0,
+        fatG: 12,
+        source: .usda,
+        confidence: .medium,
+        barcode: nil,
+        notes: "USDA Atlantic salmon, cooked, per 100g",
+        defaultLoggedPortion: FoodPortion(amount: 6, unit: .ounce, preparation: .cooked)
+    )
+
+    static let appleMedium = Entry(
+        key: "apple_medium",
+        aliases: ["apple", "apples"],
+        displayName: "Apple",
+        brand: nil,
+        displayUnit: "medium",
+        referenceQuantity: 1,
+        referenceUnit: .count,
+        preparation: .raw,
+        calories: 95,
+        proteinG: 0.5,
+        carbsG: 25,
+        fatG: 0.3,
+        source: .usda,
+        confidence: .medium,
+        barcode: nil,
+        notes: "USDA apple, medium (182g)"
+    )
+
+    static let clementine = Entry(
+        key: "clementine",
+        aliases: ["clementine", "clementines", "cutie", "cuties"],
+        displayName: "Clementine",
+        brand: nil,
+        displayUnit: "fruit",
+        referenceQuantity: 1,
+        referenceUnit: .count,
+        preparation: .raw,
+        calories: 35,
+        proteinG: 0.6,
+        carbsG: 9,
+        fatG: 0.1,
+        source: .usda,
+        confidence: .medium,
+        barcode: nil,
+        notes: "USDA clementine, 1 fruit (74g)"
+    )
+
+    static let bananaMedium = Entry(
+        key: "banana_medium",
+        aliases: ["banana", "bananas"],
+        displayName: "Banana",
+        brand: nil,
+        displayUnit: "medium",
+        referenceQuantity: 1,
+        referenceUnit: .count,
+        preparation: .raw,
+        calories: 105,
+        proteinG: 1.3,
+        carbsG: 27,
+        fatG: 0.4,
+        source: .usda,
+        confidence: .medium,
+        barcode: nil,
+        notes: "USDA banana, medium (118g)"
+    )
+
+    static let butterTbsp = Entry(
+        key: "butter_tbsp",
+        aliases: ["butter"],
+        displayName: "Butter",
+        brand: nil,
+        displayUnit: "tbsp",
+        referenceQuantity: 1,
+        referenceUnit: .tablespoon,
+        preparation: .unknown,
+        calories: 102,
+        proteinG: 0.1,
+        carbsG: 0,
+        fatG: 11.5,
+        source: .usda,
+        confidence: .medium,
+        barcode: nil,
+        notes: "USDA butter, 1 tbsp (14g)",
+        defaultLoggedPortion: FoodPortion(amount: 1, unit: .tablespoon, preparation: .unknown)
+    )
+
+    static let oliveOilTbsp = Entry(
+        key: "olive_oil_tbsp",
+        aliases: ["olive oil", "oil"],
+        displayName: "Olive oil",
+        brand: nil,
+        displayUnit: "tbsp",
+        referenceQuantity: 1,
+        referenceUnit: .tablespoon,
+        preparation: .unknown,
+        calories: 119,
+        proteinG: 0,
+        carbsG: 0,
+        fatG: 13.5,
+        source: .usda,
+        confidence: .medium,
+        barcode: nil,
+        notes: "USDA olive oil, 1 tbsp",
+        defaultLoggedPortion: FoodPortion(amount: 1, unit: .tablespoon, preparation: .unknown)
+    )
+
+    static let peanutButterTbsp = Entry(
+        key: "peanut_butter_tbsp",
+        aliases: ["peanut butter"],
+        displayName: "Peanut butter",
+        brand: nil,
+        displayUnit: "tbsp",
+        referenceQuantity: 1,
+        referenceUnit: .tablespoon,
+        preparation: .unknown,
+        calories: 94,
+        proteinG: 4,
+        carbsG: 3.5,
+        fatG: 8,
+        source: .usda,
+        confidence: .medium,
+        barcode: nil,
+        notes: "USDA peanut butter, 1 tbsp"
+    )
+
+    static let almondButterTbsp = Entry(
+        key: "almond_butter_tbsp",
+        aliases: ["almond butter"],
+        displayName: "Almond butter",
+        brand: nil,
+        displayUnit: "tbsp",
+        referenceQuantity: 1,
+        referenceUnit: .tablespoon,
+        preparation: .unknown,
+        calories: 98,
+        proteinG: 3.4,
+        carbsG: 3,
+        fatG: 8.9,
+        source: .usda,
+        confidence: .medium,
+        barcode: nil,
+        notes: "USDA almond butter, 1 tbsp"
+    )
+
+    static let avocadoHalf = Entry(
+        key: "avocado",
+        aliases: ["avocado"],
+        displayName: "Avocado",
+        brand: nil,
+        displayUnit: "half",
+        referenceQuantity: 0.5,
+        referenceUnit: .count,
+        preparation: .raw,
+        calories: 120,
+        proteinG: 1.5,
+        carbsG: 6,
+        fatG: 11,
+        source: .usda,
+        confidence: .medium,
+        barcode: nil,
+        notes: "USDA avocado, 1/2 fruit — default when amount unspecified"
+    )
+
+    static let cheddarSlice = Entry(
+        key: "cheddar_slice",
+        aliases: ["cheese", "cheddar"],
+        displayName: "Cheddar",
+        brand: nil,
+        displayUnit: "slice",
+        referenceQuantity: 1,
+        referenceUnit: .slice,
+        preparation: .unknown,
+        calories: 90,
+        proteinG: 5,
+        carbsG: 0.5,
+        fatG: 7,
+        source: .usda,
+        confidence: .medium,
+        barcode: nil,
+        notes: "USDA cheddar, 1 slice (~21g)"
+    )
+
+    static let carrotMedium = Entry(
+        key: "carrot_medium",
+        aliases: ["carrot", "carrots"],
+        displayName: "Carrot",
+        brand: nil,
+        displayUnit: "medium",
+        referenceQuantity: 1,
+        referenceUnit: .count,
+        preparation: .raw,
+        calories: 25,
+        proteinG: 0.6,
+        carbsG: 6,
+        fatG: 0.1,
+        source: .usda,
+        confidence: .medium,
+        barcode: nil,
+        notes: "USDA carrot, medium (61g)"
+    )
+
+    static let carrotCup = Entry(
+        key: "carrot_cup",
+        aliases: ["carrot", "carrots"],
+        displayName: "Carrots",
+        brand: nil,
+        displayUnit: "cup",
+        referenceQuantity: 1,
+        referenceUnit: .cup,
+        preparation: .raw,
+        calories: 52,
+        proteinG: 1.2,
+        carbsG: 12.3,
+        fatG: 0.3,
+        source: .usda,
+        confidence: .medium,
+        barcode: nil,
+        notes: "USDA carrots, raw, 1 cup chopped (128g)"
+    )
+
+    static let greekYogurtCup = Entry(
+        key: "greek_yogurt_cup",
+        aliases: ["greek yogurt", "yogurt", "greek"],
+        displayName: "Greek yogurt",
+        brand: nil,
+        displayUnit: "cup",
+        referenceQuantity: 1,
+        referenceUnit: .cup,
+        preparation: .unknown,
+        calories: 100,
+        proteinG: 17,
+        carbsG: 6,
+        fatG: 0,
+        source: .usda,
+        confidence: .medium,
+        barcode: nil,
+        notes: "Nonfat Greek yogurt, 1 cup"
+    )
+
+    static let riceCookedCup = Entry(
+        key: "rice_cooked_cup",
+        aliases: ["rice"],
+        displayName: "Cooked rice",
+        brand: nil,
+        displayUnit: "cup",
+        referenceQuantity: 1,
+        referenceUnit: .cup,
+        preparation: .cooked,
+        calories: 205,
+        proteinG: 4.3,
+        carbsG: 45,
+        fatG: 0.4,
+        source: .usda,
+        confidence: .medium,
+        barcode: nil,
+        notes: "USDA white rice, cooked, 1 cup",
+        defaultLoggedPortion: FoodPortion(amount: 1, unit: .cup, preparation: .cooked)
+    )
+
+    static let potatoChipsOz = Entry(
+        key: "potato_chips_oz",
+        aliases: ["chips", "chip", "potato chips"],
+        displayName: "Potato chips",
+        brand: nil,
+        displayUnit: "oz",
+        referenceQuantity: 1,
+        referenceUnit: .ounce,
+        preparation: .unknown,
+        calories: 150,
+        proteinG: 2,
+        carbsG: 15,
+        fatG: 10,
+        source: .usda,
+        confidence: .medium,
+        barcode: nil,
+        notes: "USDA potato chips, ~1 oz serving",
+        defaultLoggedPortion: FoodPortion(amount: 1, unit: .ounce, preparation: .unknown)
+    )
+
+    static let bigMac = Entry(
+        key: "big_mac",
+        aliases: ["big mac", "bigmac"],
+        displayName: "Big Mac",
+        brand: "McDonald's",
+        displayUnit: "sandwich",
+        referenceQuantity: 1,
+        referenceUnit: .count,
+        preparation: .cooked,
+        calories: 590,
+        proteinG: 25,
+        carbsG: 46,
+        fatG: 34,
+        source: .restaurant,
+        confidence: .high,
+        barcode: nil,
+        notes: "McDonald's published Big Mac nutrition"
+    )
+
+    /// Hostess Twinkies label, one cake (38.5g). Not a protein food.
+    static let hostessTwinkie = Entry(
+        key: "hostess_twinkie",
+        aliases: ["twinkie", "twinkies"],
+        displayName: "Twinkie",
+        brand: "Hostess",
+        displayUnit: "cake",
+        referenceQuantity: 1,
+        referenceUnit: .count,
+        preparation: .unknown,
+        calories: 140,
+        proteinG: 1,
+        carbsG: 23,
+        fatG: 4.5,
+        source: .manufacturer,
+        confidence: .high,
+        barcode: nil,
+        notes: "Hostess Twinkies label · 1 cake (38.5g)"
+    )
+
+    static let coconutMilkCup = Entry(
+        key: "coconut_milk_carton",
+        aliases: ["coconut milk", "coconutmilk"],
+        displayName: "Coconut milk",
+        brand: nil,
+        displayUnit: "cup",
+        referenceQuantity: 1,
+        referenceUnit: .cup,
+        preparation: .unknown,
+        calories: 50,
+        proteinG: 0.5,
+        carbsG: 2,
+        fatG: 4.5,
+        source: .manufacturer,
+        confidence: .medium,
+        barcode: nil,
+        notes: "Carton beverage coconut milk, 8 fl oz — not canned cream"
+    )
+
+    static let almondMilkCup = Entry(
+        key: "almond_milk",
+        aliases: ["almond milk"],
+        displayName: "Almond milk",
+        brand: nil,
+        displayUnit: "cup",
+        referenceQuantity: 1,
+        referenceUnit: .cup,
+        preparation: .unknown,
+        calories: 40,
+        proteinG: 1,
+        carbsG: 2,
+        fatG: 3,
+        source: .manufacturer,
+        confidence: .medium,
+        barcode: nil,
+        notes: "Unsweetened-style carton almond milk, 8 fl oz"
+    )
+
+    static let oatMilkCup = Entry(
+        key: "oat_milk",
+        aliases: ["oat milk"],
+        displayName: "Oat milk",
+        brand: nil,
+        displayUnit: "cup",
+        referenceQuantity: 1,
+        referenceUnit: .cup,
+        preparation: .unknown,
+        calories: 120,
+        proteinG: 3,
+        carbsG: 16,
+        fatG: 5,
+        source: .manufacturer,
+        confidence: .medium,
+        barcode: nil,
+        notes: "Carton oat milk, 8 fl oz"
+    )
+
+    static let soyMilkCup = Entry(
+        key: "soy_milk",
+        aliases: ["soy milk", "soymilk"],
+        displayName: "Soy milk",
+        brand: nil,
+        displayUnit: "cup",
+        referenceQuantity: 1,
+        referenceUnit: .cup,
+        preparation: .unknown,
+        calories: 80,
+        proteinG: 7,
+        carbsG: 4,
+        fatG: 4,
+        source: .manufacturer,
+        confidence: .medium,
+        barcode: nil,
+        notes: "Carton soy milk, 8 fl oz"
+    )
+
+    static let fairlifeChocolateCup = Entry(
+        key: "fairlife_chocolate",
+        aliases: ["fairlife", "fair life", "core power"],
+        displayName: "Fairlife Chocolate Milk",
+        brand: "Fairlife",
+        displayUnit: "cup",
+        referenceQuantity: 1,
+        referenceUnit: .cup,
+        preparation: .unknown,
+        calories: 140,
+        proteinG: 13,
+        carbsG: 13,
+        fatG: 4.5,
+        source: .manufacturer,
+        confidence: .high,
+        barcode: nil,
+        notes: "Fairlife ultra-filtered chocolate milk, ~1 cup"
+    )
+
+    static let nesquikCup = Entry(
+        key: "nesquik_chocolate_milk",
+        aliases: ["nesquik", "chocolate milk"],
+        displayName: "Chocolate milk",
+        brand: nil,
+        displayUnit: "cup",
+        referenceQuantity: 1,
+        referenceUnit: .cup,
+        preparation: .unknown,
+        calories: 140,
+        proteinG: 5,
+        carbsG: 24,
+        fatG: 2.5,
+        source: .manufacturer,
+        confidence: .medium,
+        barcode: nil,
+        notes: "Nesquik-style RTD chocolate milk, 8 fl oz"
+    )
+
+    static let ice = Entry(
+        key: "ice",
+        aliases: ["ice cube", "ice cubes"],
+        displayName: "Ice",
+        brand: nil,
+        displayUnit: "serving",
+        referenceQuantity: 1,
+        referenceUnit: .count,
+        preparation: .unknown,
+        calories: 0,
+        proteinG: 0,
+        carbsG: 0,
+        fatG: 0,
+        source: .usda,
+        confidence: .high,
+        barcode: nil,
+        notes: "Plain ice is water. ~0 calories."
+    )
+
+    static let water = Entry(
+        key: "water",
+        aliases: ["tap water", "sparkling water", "seltzer"],
+        displayName: "Water",
+        brand: nil,
+        displayUnit: "serving",
+        referenceQuantity: 1,
+        referenceUnit: .count,
+        preparation: .unknown,
+        calories: 0,
+        proteinG: 0,
+        carbsG: 0,
+        fatG: 0,
+        source: .usda,
+        confidence: .high,
+        barcode: nil,
+        notes: "Plain water. ~0 calories."
+    )
+
+    /// Ordered most-specific first so "Dave's thin" wins over generic bread.
+    static let allEntries: [Entry] = [
+        davesThinSliced,
+        davesKillerBread21WholeGrains,
+        hostessTwinkie,
+        bigMac,
+        fairlifeChocolateCup,
+        nesquikCup,
+        coconutMilkCup,
+        almondMilkCup,
+        oatMilkCup,
+        soyMilkCup,
+        ice,
+        water,
+        sourdoughSlice,
+        largeEgg,
+        peanutButterTbsp,
+        almondButterTbsp,
+        butterTbsp,
+        oliveOilTbsp,
+        avocadoHalf,
+        cheddarSlice,
+        appleMedium,
+        clementine,
+        bananaMedium,
+        carrotCup,
+        carrotMedium,
+        chickenBreastCooked,
+        chickenBreastRaw,
+        groundBeefCookedCup,
+        groundBeefCooked,
+        salmonCooked,
+        greekYogurtCup,
+        riceCookedCup,
+        potatoChipsOz,
+        genericToastSlice,
+    ]
+
+    // MARK: - Matching / scaling
+
+    /// Resolve a per-unit staple from a food name / utterance.
+    static func match(in raw: String) -> Entry? {
+        scale(for: raw)?.entry
+    }
+
+    static func scale(for raw: String) -> ScaledResult? {
+        let lower = raw.lowercased()
+        let portion = FoodQuantity.parse(from: raw)
+        guard let entry = bestEntry(for: lower, portion: portion) else { return nil }
+
+        var assumptions: [String] = [entry.notes]
+        var usedPortion = portion
+        var inferredPrep = false
+        var usedDefaultPortion = false
+
+        if entry.preparation != .unknown, portion.preparation == .unknown {
+            usedPortion.preparation = entry.preparation
+            inferredPrep = true
+            assumptions.append("Assumed \(entry.preparation.rawValue) weight. Raw and cooked are not interchangeable.")
+        }
+
+        if entry.key == "avocado", portion.unit == .count, portion.amount == 1, !lower.contains("half") {
+            // Default 1 avocado → whole fruit = 2 × half reference.
+            let totals = entry.perReference.scaled(by: 2)
+            return ScaledResult(
+                entry: entry,
+                portion: usedPortion,
+                multiplier: 2,
+                totals: totals,
+                inferredPreparation: inferredPrep,
+                usedDefaultPortion: true,
+                assumptions: assumptions + ["Assumed 1 whole avocado (2 halves)."]
+            )
+        }
+
+        // Countable "1 serving" / bare "chicken" against a 100g reference used to scale 1/100.
+        if let assumed = assumedPortionIfUnspecified(consumed: usedPortion, entry: entry) {
+            usedPortion = assumed.portion
+            usedDefaultPortion = true
+            assumptions.append(assumed.assumption)
+        }
+
+        // Unspecified chicken ounces: people usually mean cooked; flag uncertainty.
+        if entry.key.hasPrefix("chicken"), portion.preparation == .unknown {
+            inferredPrep = true
+            if !assumptions.contains(where: { $0.lowercased().contains("cooked") }) {
+                assumptions.append("Preparation not specified. Used cooked nutrition. Say raw or cooked for a tighter match.")
+            }
+        }
+
+        let factor = FoodQuantity.multiplier(
+            consumed: usedPortion,
+            referenceQuantity: entry.referenceQuantity,
+            referenceUnit: entry.referenceUnit
+        )
+        let totals = entry.perReference.scaled(by: factor)
+        return ScaledResult(
+            entry: entry,
+            portion: usedPortion,
+            multiplier: factor,
+            totals: totals,
+            inferredPreparation: inferredPrep,
+            usedDefaultPortion: usedDefaultPortion,
+            assumptions: assumptions
+        )
+    }
+
+    /// Bare "chicken" parses as 1 count. Never divide that count by a 100g reference.
+    private static func assumedPortionIfUnspecified(
+        consumed: FoodPortion,
+        entry: Entry
+    ) -> (portion: FoodPortion, assumption: String)? {
+        guard consumed.unit.isCountable else { return nil }
+        let fallback: FoodPortion
+        if let listed = entry.defaultLoggedPortion {
+            fallback = listed
+        } else if entry.referenceUnit.isMass || (entry.referenceUnit.isVolume && consumed.unit != entry.referenceUnit) {
+            fallback = FoodPortion(
+                amount: entry.referenceQuantity,
+                unit: entry.referenceUnit,
+                preparation: entry.preparation
+            )
+        } else {
+            return nil
+        }
+
+        let plates = max(consumed.amount, 0.05)
+        let portion = FoodPortion(
+            amount: fallback.amount * plates,
+            unit: fallback.unit,
+            preparation: consumed.preparation == .unknown ? fallback.preparation : consumed.preparation
+        )
+        return (
+            portion,
+            "Assumed \(FoodQuantity.describe(portion)) of \(entry.displayName.lowercased()). A weight/volume was not specified (not 1 count per \(Int(entry.referenceQuantity))\(entry.referenceUnit.displayName.isEmpty ? " unit" : entry.referenceUnit.displayName))."
+        )
+    }
+
+    /// Quantity from the label ("2 Slices Dave's Toast" → 2) times per-unit macros.
+    static func scaledMacros(forName name: String) -> (MacroTotals, Entry, Int)? {
+        guard let scaled = scale(for: name) else { return nil }
+        let qty = max(Int(scaled.portion.amount.rounded()), 1)
+        return (scaled.totals, scaled.entry, qty)
+    }
+
+    private static func bestEntry(for lower: String, portion: FoodPortion) -> Entry? {
+        let haystack = lower
+
+        if haystack.contains("dave"), haystack.contains("thin") {
+            return davesThinSliced
+        }
+        if haystack.contains("dave") {
+            return davesKillerBread21WholeGrains
+        }
+        if looksLikePlainIce(haystack) {
+            return ice
+        }
+        if looksLikePlainWater(haystack) {
+            return water
+        }
+
+        if matchesToken(haystack, "carrot") || haystack.contains("carrots") {
+            return portion.unit == .cup ? carrotCup : carrotMedium
+        }
+        if haystack.contains("ground beef") {
+            return portion.unit == .cup ? groundBeefCookedCup : groundBeefCooked
+        }
+        if haystack.contains("chicken") {
+            if portion.preparation == .raw { return chickenBreastRaw }
+            return chickenBreastCooked
+        }
+        if haystack.contains("salmon") || (matchesToken(haystack, "fish") && !haystack.contains("shellfish")) {
+            return salmonCooked
+        }
+
+        // Longer / more specific aliases first among remaining entries.
+        let ranked = allEntries.sorted { $0.aliases.map(\.count).max() ?? 0 > $1.aliases.map(\.count).max() ?? 0 }
+        for entry in ranked {
+            if entry.key.hasPrefix("chicken") || entry.key.hasPrefix("ground_beef") { continue }
+            if entry.key.hasPrefix("carrot") { continue }
+            if entry.key == "generic_toast", haystack.contains("dave") || haystack.contains("sourdough") {
+                continue
+            }
+            if entry.key == "nesquik_chocolate_milk", haystack.contains("fairlife") || haystack.contains("coconut")
+                || haystack.contains("almond milk") || haystack.contains("oat milk") {
+                continue
+            }
+            if entry.key == "olive_oil_tbsp", haystack.contains("olive oil") {
+                return entry
+            }
+            if entry.key == "olive_oil_tbsp", haystack.contains("oil"), !haystack.contains("olive") {
+                // Bare "oil" — only if it's clearly cooking oil, not "oil-based".
+                if matchesToken(haystack, "oil") { return entry }
+                continue
+            }
+            for alias in entry.aliases {
+                if alias.contains(" ") {
+                    if haystack.contains(alias) { return entry }
+                } else if matchesToken(haystack, alias) {
+                    return entry
+                }
+            }
+        }
+        return nil
+    }
+
+    /// "Ice" / "ice cubes" — not ice cream, iced coffee, or Italian ice.
+    static func looksLikePlainIce(_ text: String) -> Bool {
+        let lower = text.lowercased()
+        if lower.contains("ice cream") || lower.contains("ice-cream") || lower.contains("icecream") {
+            return false
+        }
+        if lower.contains("iced") || lower.contains("italian ice") || lower.contains("icee") {
+            return false
+        }
+        return matchesToken(lower, "ice") || lower.contains("ice cube")
+    }
+
+    static func looksLikePlainWater(_ text: String) -> Bool {
+        let lower = text.lowercased()
+        if lower.contains("coconut") || lower.contains("tonic") || lower.contains("vitamin")
+            || lower.contains("melon") || lower.contains("watermelon") {
+            return false
+        }
+        return matchesToken(lower, "water") || lower.contains("seltzer")
+    }
+
+    private static func matchesToken(_ text: String, _ token: String) -> Bool {
+        guard let regex = try? NSRegularExpression(
+            pattern: "\\b\(NSRegularExpression.escapedPattern(for: token))\\b",
+            options: .caseInsensitive
+        ) else { return false }
+        return regex.firstMatch(in: text, range: NSRange(text.startIndex..<text.endIndex, in: text)) != nil
+    }
+}

@@ -523,6 +523,7 @@
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_ENABLE_TESTABILITY = YES;
 				TARGETED_DEVICE_FAMILY = 1;
+				USDA_API_KEY = "";
 			};
 			name = Release;
 		};
@@ -574,6 +575,7 @@
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_ENABLE_TESTABILITY = YES;
 				TARGETED_DEVICE_FAMILY = 1;
+				USDA_API_KEY = "";
 			};
 			name = Debug;
 		};

@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 struct BarcodeProductResult: Equatable, Sendable {
     let barcode: String
@@ -570,13 +571,54 @@ struct USDAGenericFood: Sendable {
 /// USDA FoodData Central lookup. Barcodes use branded foods; unnamed foods use Foundation / SR Legacy.
 enum USDAFoodDataService {
     private static let searchURL = "https://api.nal.usda.gov/fdc/v1/foods/search"
-    /// Public demo key. A `USDA_API_KEY` in Secrets.plist replaces it.
+    /// Public demo key. About 30 requests per hour and 50 per day, per IP.
+    /// A real key comes from the `USDA_API_KEY` environment variable, Info.plist
+    /// (an xcconfig or build setting fills `$(USDA_API_KEY)`), or Secrets.plist.
     private static let demoKey = "DEMO_KEY"
+    private static let rateLimitedUntil = OSAllocatedUnfairLock(initialState: Date.distantPast)
+
+    /// Key the live requests will send. Blank, `DEMO_KEY`, and `YOUR_…` placeholders are ignored.
+    static var apiKey: String {
+        let candidates: [String?] = [
+            ProcessInfo.processInfo.environment["USDA_API_KEY"],
+            Bundle.main.object(forInfoDictionaryKey: "USDA_API_KEY") as? String,
+            Secrets.value(for: "USDA_API_KEY"),
+        ]
+        for candidate in candidates {
+            guard let key = candidate?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  isUsableAPIKey(key) else { continue }
+            return key
+        }
+        return demoKey
+    }
+
+    static var isUsingDemoKey: Bool { apiKey == demoKey }
+
+    /// Known foods skip the demo key so a 429 cannot wipe a tablespoon of honey.
+    /// A test double always runs. A real key runs outside XCTest, then falls back to the table.
+    static func shouldQueryBeforeStaple() -> Bool {
+        if genericLookupForTests != nil { return true }
+        if isRunningUnderXCTest { return false }
+        return !isUsingDemoKey
+    }
+
+    private static var isRunningUnderXCTest: Bool {
+        let environment = ProcessInfo.processInfo.environment
+        return environment["XCTestConfigurationFilePath"] != nil
+            || environment["XCTestSessionIdentifier"] != nil
+    }
+
+    private static func isUsableAPIKey(_ key: String) -> Bool {
+        if key.isEmpty || key == demoKey { return false }
+        if key.hasPrefix("$(") { return false }
+        if key.contains("YOUR_") { return false }
+        return true
+    }
 
     static func lookup(barcode: String) async throws -> BarcodeProductResult? {
         let digits = barcode.filter(\.isNumber)
         guard !digits.isEmpty else { return nil }
-        let key = Secrets.value(for: "USDA_API_KEY") ?? demoKey
+        let key = apiKey
 
         var components = URLComponents(string: searchURL)!
         components.queryItems = [
@@ -590,8 +632,11 @@ enum USDAFoodDataService {
         var request = URLRequest(url: url)
         request.timeoutInterval = 12
         request.setValue("FunFitnessTrainer/1.0 (iOS; macro tracker)", forHTTPHeaderField: "User-Agent")
+        if rateLimitIsActive() { return nil }
         let (data, response) = try await URLSession.shared.data(for: request)
-        guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
+        guard let http = response as? HTTPURLResponse else { return nil }
+        if recordRateLimit(http) { return nil }
+        guard (200...299).contains(http.statusCode) else {
             return nil
         }
         guard
@@ -612,7 +657,7 @@ enum USDAFoodDataService {
     /// Tests install this so a generic-food lookup does not call the USDA API.
     static var genericLookupForTests: (@Sendable (String) async -> USDAGenericFood?)?
 
-    /// Foundation / SR Legacy name search for foods that are not local staples (honey, berries, …).
+    /// Foundation / SR Legacy name search. Known pantry foods can skip this on DEMO_KEY.
     /// "raw honey" must not match every SR Legacy row that merely ends in ", raw".
     static func lookupGeneric(query: String) async -> USDAGenericFood? {
         if let genericLookupForTests {
@@ -709,6 +754,9 @@ enum USDAFoodDataService {
             "boiled", "steamed", "fresh", "organic", "plain", "homemade", "leftover",
             "pint", "pints", "glass", "glasses", "bottle", "bottles", "can", "cans",
             "shot", "shots", "ounce", "ounces", "cup", "cups",
+            "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+            "tablespoon", "tablespoons", "teaspoon", "teaspoons", "tbsp", "tsp",
+            "of", "a", "an", "some",
         ]
         return wordTokens(source)
             .filter { !ignored.contains($0) }
@@ -746,6 +794,13 @@ enum USDAFoodDataService {
         if let hit = matchingPortion(portion, in: portions) {
             let grams = hit.gramWeight * portion.amount / max(hit.amount, 0.01)
             return (grams, portion.amount, portion.unit.displayName, hit.modifier, false)
+        }
+        // Empty food-detail portions used to treat 1 tablespoon as 100 g (or as 15 ml).
+        // Honey's tablespoon is 21 g. Use the bundled weight before any generic fallback.
+        if let grams = StapleNutritionDatabase.householdGrams(in: userQuery), grams > 0 {
+            let unit = portion.unit.displayName
+            let label = "\(formatAmount(portion.amount)) \(unit)"
+            return (grams, portion.amount, unit.isEmpty ? "g" : unit, label, false)
         }
         if portion.unit.isVolume, let ml = portion.unit.toMilliliters(portion.amount), ml > 0 {
             let label = "\(formatAmount(portion.amount)) \(portion.unit.displayName)"
@@ -798,8 +853,27 @@ enum USDAFoodDataService {
         amount == floor(amount) ? String(Int(amount)) : String(format: "%g", amount)
     }
 
+    /// Spoken "one tablespoon" applied to USDA per-100 g data.
+    /// A missing portion list must not keep the 100 g fallback when we know the food's tablespoon.
+    static func applyingHouseholdMeasure(_ food: USDAGenericFood, query: String) -> USDAGenericFood {
+        guard let grams = StapleNutritionDatabase.householdGrams(in: query), grams > 0 else {
+            return food
+        }
+        let portion = FoodQuantity.parse(from: query)
+        var measured = food
+        measured.grams = grams
+        measured.quantity = portion.amount
+        let unit = portion.unit.displayName
+        if !unit.isEmpty {
+            measured.unit = unit
+        }
+        measured.portionLabel = FoodQuantity.describe(portion)
+        measured.assumedPortion = false
+        return measured
+    }
+
     private static func searchFoods(query: String, dataTypes: String, pageSize: Int) async -> [[String: Any]]? {
-        let key = Secrets.value(for: "USDA_API_KEY") ?? demoKey
+        let key = apiKey
         var components = URLComponents(string: searchURL)!
         components.queryItems = [
             URLQueryItem(name: "query", value: query),
@@ -812,24 +886,49 @@ enum USDAFoodDataService {
     }
 
     private static func foodDetail(fdcId: Int) async -> [String: Any]? {
-        let key = Secrets.value(for: "USDA_API_KEY") ?? demoKey
+        let key = apiKey
         var components = URLComponents(string: "https://api.nal.usda.gov/fdc/v1/food/\(fdcId)")!
         components.queryItems = [URLQueryItem(name: "api_key", value: key)]
         return await getJSON(components.url)
     }
 
     private static func getJSON(_ url: URL?) async -> [String: Any]? {
-        guard let url else { return nil }
+        guard let url, !rateLimitIsActive() else { return nil }
         var request = URLRequest(url: url)
         request.timeoutInterval = 10
         request.setValue("FunFitnessTrainer/1.0 (iOS; macro tracker)", forHTTPHeaderField: "User-Agent")
         guard
             let (data, response) = try? await URLSession.shared.data(for: request),
-            let http = response as? HTTPURLResponse,
+            let http = response as? HTTPURLResponse
+        else { return nil }
+        if recordRateLimit(http) { return nil }
+        guard
             (200...299).contains(http.statusCode),
             let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else { return nil }
         return json
+    }
+
+    /// 429 is a miss, not a crash. Later foods use the bundled table until the window passes.
+    private static func rateLimitIsActive() -> Bool {
+        rateLimitedUntil.withLock { $0 > Date() }
+    }
+
+    private static func recordRateLimit(_ http: HTTPURLResponse) -> Bool {
+        guard http.statusCode == 429 else { return false }
+        let header = http.value(forHTTPHeaderField: "Retry-After").flatMap { Double($0) }
+        let seconds = min(max(header ?? 60 * 60, 30), 60 * 60)
+        let until = Date().addingTimeInterval(seconds)
+        rateLimitedUntil.withLock { current in
+            if until > current { current = until }
+        }
+        AgentDebugLog.emit(
+            hypothesisId: "B",
+            location: "USDAFoodDataService.recordRateLimit",
+            message: "USDA returned 429",
+            data: ["retryAfter": seconds]
+        )
+        return true
     }
 
     private static func parsedPortions(from food: [String: Any]) -> [USDAPortion] {
@@ -1020,7 +1119,7 @@ enum USDAFoodDataService {
     }
 
     private static func postFoodSearch(query: String, dataTypes: [String], pageSize: Int) async -> [[String: Any]]? {
-        let key = Secrets.value(for: "USDA_API_KEY") ?? demoKey
+        let key = apiKey
         guard var components = URLComponents(string: searchURL) else { return nil }
         components.queryItems = [URLQueryItem(name: "api_key", value: key)]
         guard let url = components.url else { return nil }
@@ -1036,9 +1135,13 @@ enum USDAFoodDataService {
             "pageSize": pageSize,
         ]
         request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        guard !rateLimitIsActive() else { return nil }
         guard
             let (data, response) = try? await URLSession.shared.data(for: request),
-            let http = response as? HTTPURLResponse,
+            let http = response as? HTTPURLResponse
+        else { return nil }
+        if recordRateLimit(http) { return nil }
+        guard
             (200...299).contains(http.statusCode),
             let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else { return nil }

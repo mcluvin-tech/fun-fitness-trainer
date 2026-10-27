@@ -22,6 +22,8 @@
 	<string>16</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<key>USDA_API_KEY</key>
+	<string>$(USDA_API_KEY)</string>
 	<key>NSCameraUsageDescription</key>
 	<string>We use the camera to photograph meals, scan barcodes, and optionally save progress photos on this device.</string>
 	<key>NSPhotoLibraryUsageDescription</key>

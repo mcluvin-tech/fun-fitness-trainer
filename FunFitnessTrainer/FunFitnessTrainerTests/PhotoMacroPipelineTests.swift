@@ -566,8 +566,10 @@ final class PhotoMacroPipelineTests: XCTestCase {
     func testRawHoneyFallsThroughGenericEstimateUntilLookup() async {
         let offline = FoodAnalysisService.estimateOffline(from: "I had raw honey")
         let entry = offline.entriesForLogging().first
-        XCTAssertEqual(entry?.calories ?? 0, 242, "Offline placeholder is Atwater of 8/30/10 until USDA lookup")
-        XCTAssertEqual(entry?.proteinG ?? 0, 8)
+        XCTAssertEqual(offline.calories, 64, accuracy: 4, "Bare honey is 1 tablespoon from the bundled table, not the 242 placeholder")
+        XCTAssertLessThan(offline.proteinG, 1)
+        XCTAssertEqual(offline.source, .usda)
+        XCTAssertFalse(FoodAnalysisService.isUnidentifiedPlaceholder(offline))
 
         // 1 tbsp of USDA honey is 21 g. 304 kcal and 0.3 g protein per 100 g.
         let honey = USDAGenericFood(
@@ -607,10 +609,75 @@ final class PhotoMacroPipelineTests: XCTestCase {
 
         USDAFoodDataService.genericLookupForTests = { @Sendable _ in nil }
         let missed = await FoodAnalysisService.resolveMealForLogging(from: "I had raw honey")
-        XCTAssertEqual(missed.source, .genericEstimate)
-        XCTAssertEqual(missed.calories, 242, accuracy: 0.1)
+        XCTAssertEqual(missed.calories, 64, accuracy: 4, "A USDA miss still uses the bundled tablespoon")
+        XCTAssertLessThan(missed.proteinG, 1)
+        XCTAssertEqual(missed.source, .usda)
         XCTAssertNotEqual(missed.source, .manufacturer, "No brand was named, so a jar from the packaged catalog must not win")
+        XCTAssertFalse(FoodAnalysisService.isUnidentifiedPlaceholder(missed))
         await AgentDebugLog.flush()
+    }
+
+    /// The mic says the measure. USDA may answer with per-100 g data, or 429 and answer nothing.
+    func testSpokenTablespoonOfHoneyResolvesOfflineAndFromUSDA() async {
+        defer { USDAFoodDataService.genericLookupForTests = nil }
+
+        let unscaled = USDAGenericFood(
+            name: "Honey",
+            dataType: "SR Legacy",
+            per100g: MacroTotals(calories: 304, proteinG: 0.3, carbsG: 82.4, fatG: 0),
+            grams: 100,
+            quantity: 1,
+            unit: "g",
+            portionLabel: "100 g",
+            assumedPortion: true
+        )
+        USDAFoodDataService.genericLookupForTests = { @Sendable _ in unscaled }
+        let success = await TrainerService.resolveLoggedFood(from: "I had one tablespoon of raw honey")
+        assertHoneyTablespoon(success.meal)
+        XCTAssertEqual(success.meal.source, .usda)
+        XCTAssertLessThan(success.meal.calories, 100, "1 tablespoon must not stay at the 100 g USDA row")
+
+        let placeholder = MealPayload(
+            name: "Raw Honey",
+            calories: 242,
+            proteinG: 8,
+            carbsG: 30,
+            fatG: 10,
+            source: .genericEstimate,
+            confidence: .low
+        )
+        XCTAssertTrue(FoodAnalysisService.lookupShouldReplace(original: placeholder, resolved: success.meal))
+
+        USDAFoodDataService.genericLookupForTests = { @Sendable _ in nil }
+        let failure = await TrainerService.resolveLoggedFood(from: "I had one tablespoon of raw honey")
+        assertHoneyTablespoon(failure.meal)
+        XCTAssertTrue(FoodAnalysisService.lookupShouldReplace(original: placeholder, resolved: failure.meal))
+
+        let teaspoon = await TrainerService.resolveLoggedFood(from: "a teaspoon of honey")
+        XCTAssertEqual(teaspoon.meal.calories, 21, accuracy: 3)
+        XCTAssertLessThan(teaspoon.meal.proteinG, 1)
+        XCTAssertLessThan(teaspoon.meal.fatG, 1)
+        XCTAssertFalse(FoodAnalysisService.isUnidentifiedPlaceholder(teaspoon.meal))
+
+        let peanutButter = await TrainerService.resolveLoggedFood(from: "two tablespoons of peanut butter")
+        XCTAssertEqual(peanutButter.meal.calories, 190, accuracy: 10)
+        XCTAssertEqual(peanutButter.meal.proteinG, 8, accuracy: 1)
+        XCTAssertFalse(FoodAnalysisService.isUnidentifiedPlaceholder(peanutButter.meal))
+    }
+
+    private func assertHoneyTablespoon(
+        _ meal: MealPayload,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        XCTAssertEqual(meal.calories, 64, accuracy: 4, "1 tbsp honey is about 64 kcal", file: file, line: line)
+        XCTAssertLessThan(meal.proteinG, 1, file: file, line: line)
+        XCTAssertEqual(meal.carbsG, 17, accuracy: 2, file: file, line: line)
+        XCTAssertLessThan(meal.fatG, 1, file: file, line: line)
+        XCTAssertNotEqual(meal.source, .manufacturer, file: file, line: line)
+        XCTAssertNotEqual(meal.source, .genericEstimate, file: file, line: line)
+        XCTAssertFalse(FoodAnalysisService.isUnidentifiedPlaceholder(meal), file: file, line: line)
+        XCTAssertFalse(meal.name.lowercased().contains("oz"), file: file, line: line)
     }
 
     func testAlsoHadStillLogsFruit() {

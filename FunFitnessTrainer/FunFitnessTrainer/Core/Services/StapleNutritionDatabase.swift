@@ -342,6 +342,46 @@ enum StapleNutritionDatabase {
         gramsPerTablespoon: 13.5
     )
 
+    /// USDA honey, per 100 g. A tablespoon is 21 g: about 64 kcal, 0 g protein, 17 g carbs, 0 g fat.
+    static let honey = per100g(
+        key: "honey",
+        aliases: ["honey", "raw honey"],
+        name: "Honey",
+        calories: 304,
+        proteinG: 0.3,
+        carbsG: 82.4,
+        fatG: 0,
+        notes: "USDA honey per 100 g. 1 tablespoon is 21 g (about 64 kcal). 1 teaspoon is 7 g (about 21 kcal).",
+        gramsPerTablespoon: 21,
+        defaultPortion: FoodPortion(amount: 1, unit: .tablespoon, preparation: .unknown)
+    )
+
+    static let whiteSugar = per100g(
+        key: "sugar",
+        aliases: ["sugar", "white sugar", "granulated sugar", "brown sugar"],
+        name: "Sugar",
+        calories: 387,
+        proteinG: 0,
+        carbsG: 100,
+        fatG: 0,
+        notes: "USDA granulated sugar per 100 g. 1 tablespoon is about 12.6 g.",
+        gramsPerTablespoon: 12.6,
+        defaultPortion: FoodPortion(amount: 1, unit: .tablespoon, preparation: .unknown)
+    )
+
+    static let mapleSyrup = per100g(
+        key: "maple_syrup",
+        aliases: ["maple syrup"],
+        name: "Maple syrup",
+        calories: 260,
+        proteinG: 0,
+        carbsG: 67,
+        fatG: 0,
+        notes: "USDA maple syrup per 100 g. 1 tablespoon is about 20 g.",
+        gramsPerTablespoon: 20,
+        defaultPortion: FoodPortion(amount: 1, unit: .tablespoon, preparation: .unknown)
+    )
+
     static let peanutButterTbsp = Entry(
         key: "peanut_butter_tbsp",
         aliases: ["peanut butter"],
@@ -1165,6 +1205,9 @@ enum StapleNutritionDatabase {
         cottageCheese,
         sourdoughSlice,
         largeEgg,
+        honey,
+        whiteSugar,
+        mapleSyrup,
         peanutButterTbsp,
         almondButterTbsp,
         butterTbsp,
@@ -1192,6 +1235,15 @@ enum StapleNutritionDatabase {
     /// Resolve a per-unit staple from a food name / utterance.
     static func match(in raw: String) -> Entry? {
         scale(for: raw)?.entry
+    }
+
+    /// Gram weight of a stated tablespoon, teaspoon, cup, or ounce for a known food.
+    /// A bare count ("honey" with no measure) returns nil so the food's own default serving is used.
+    static func householdGrams(in text: String) -> Double? {
+        let portion = FoodQuantity.parse(from: text)
+        guard !portion.unit.isCountable else { return nil }
+        guard let entry = bestEntry(for: text.lowercased(), portion: portion) else { return nil }
+        return gramsConsumed(entry: entry, portion: portion)
     }
 
     static func scale(for raw: String) -> ScaledResult? {
@@ -1490,6 +1542,14 @@ enum StapleNutritionDatabase {
             }
             if entry.key == "potato_baked", haystack.contains("sweet potato") || haystack.contains("chip") {
                 continue
+            }
+            if entry.key == "honey" {
+                if haystack.contains("mustard") || haystack.contains("bunches") { continue }
+            }
+            if entry.key == "sugar" {
+                if haystack.contains("sugar-free") || haystack.contains("sugar free") || haystack.contains("zero sugar") {
+                    continue
+                }
             }
             if entry.key == "olive_oil_tbsp", haystack.contains("olive oil") {
                 return entry

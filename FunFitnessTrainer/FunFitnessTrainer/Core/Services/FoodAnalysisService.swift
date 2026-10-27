@@ -254,7 +254,8 @@ enum FoodAnalysisService {
     }
 
     /// Voice/text logging. Each food in the phrase is resolved on its own:
-    /// a covering staple, then a branded catalog match when a brand was named, then generic USDA.
+    /// a branded catalog match when a brand was named, then generic USDA, then the bundled
+    /// common-food table. The 242 kcal placeholder is only for a food that table does not know.
     static func resolveMealForLogging(from description: String) async -> MealPayload {
         await resolveFoodLog(from: description).meal
     }
@@ -282,14 +283,27 @@ enum FoodAnalysisService {
     }
 
     /// A label-backed or higher-priority lookup should replace the first guess.
+    /// The 242 kcal / 8 g / 30 g / 10 g placeholder loses to any real food, including the offline table.
     static func lookupShouldReplace(original: MealPayload, resolved: MealPayload) -> Bool {
         if original.source == .userProvided || original.source == .userLabel { return false }
+        if isUnidentifiedPlaceholder(original), !isUnidentifiedPlaceholder(resolved) {
+            return true
+        }
         if resolved.isLabelBacked || resolved.source.priority < original.source.priority {
             return true
         }
         return resolved.entriesForLogging().contains { entry in
             entry.isLabelBacked || entry.source.isExact || entry.source.priority < original.source.priority
         }
+    }
+
+    /// Atwater of 8 g protein, 30 g carbs, and 10 g fat. Quantity scales it, but the ratio stays.
+    static func isUnidentifiedPlaceholder(_ meal: MealPayload) -> Bool {
+        guard meal.source == .genericEstimate, meal.calories > 1 else { return false }
+        let scale = meal.calories / 242
+        return abs(meal.proteinG - 8 * scale) < 0.75
+            && abs(meal.carbsG - 30 * scale) < 0.75
+            && abs(meal.fatG - 10 * scale) < 0.75
     }
 
     private struct SegmentLookup {
@@ -301,6 +315,19 @@ enum FoodAnalysisService {
     private static func resolveFoodSegment(_ segment: String) async -> SegmentLookup {
         let phrase = BrandedFoodResolver.correctedPhrase(segment)
         if BrandedFoodResolver.trustedStapleCovers(phrase) {
+            // A real USDA key (or a test double) can still supply per-100 g numbers.
+            // DEMO_KEY is rate limited, so a known food does not spend a request on it.
+            // A miss, timeout, or 429 keeps the bundled tablespoon instead of the 242 placeholder.
+            if USDAFoodDataService.shouldQueryBeforeStaple() {
+                if let food = await USDAFoodDataService.lookupGeneric(query: phrase) {
+                    let measured = USDAFoodDataService.applyingHouseholdMeasure(food, query: segment)
+                    return SegmentLookup(
+                        meal: mealPayload(from: measured, userDescription: segment),
+                        alternatives: [],
+                        needsConfirmation: false
+                    )
+                }
+            }
             return SegmentLookup(meal: estimateOffline(from: phrase), alternatives: [], needsConfirmation: false)
         }
 
@@ -319,7 +346,8 @@ enum FoodAnalysisService {
             // No brand was named. Foundation / SR Legacy is the food itself.
             // A packaged Open Food Facts hit here is some company's jar, not "raw honey".
             if let food = await USDAFoodDataService.lookupGeneric(query: phrase) {
-                let fromUSDA = mealPayload(from: food, userDescription: segment)
+                let measured = USDAFoodDataService.applyingHouseholdMeasure(food, query: segment)
+                let fromUSDA = mealPayload(from: measured, userDescription: segment)
                 // #region agent log
                 AgentDebugLog.emit(
                     hypothesisId: "B",

@@ -810,7 +810,7 @@ enum TrainerService {
         return responseByAttachingMeal(response, meal: meal, forceLogBubble: false)
     }
 
-    /// Catalog hit replaces the offline 242 kcal guess. A miss leaves the guess alone.
+    /// A real lookup replaces the offline 242 kcal guess. A miss leaves that guess alone.
     private static func loggedFoodReplacing(_ meal: MealPayload, utterance: String) async -> MealPayload? {
         let outcome = await resolveLoggedFood(from: utterance)
         let resolved = FoodAnalysisService.applyUserStatedMacros(outcome.meal, from: utterance)

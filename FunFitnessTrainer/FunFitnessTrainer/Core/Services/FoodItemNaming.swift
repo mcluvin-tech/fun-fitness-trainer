@@ -90,7 +90,7 @@ enum FoodItemNaming {
 
     private static let volumeMeasurePhrases = [
         "cups of ", "cup of ", "tablespoons of ", "tablespoon of ", "tbsp of ",
-        "ounces of ", "ounce of ", "oz of ",
+        "ounces of ", "ounce of ", "oz of ", "pints of ", "pint of ",
     ]
 
     // MARK: - Public
@@ -349,7 +349,7 @@ enum FoodItemNaming {
         let stop: Set<String> = [
             "a", "an", "the", "of", "and", "with", "plus", "also", "had", "ate", "drank",
             "slice", "slices", "piece", "pieces", "serving", "servings", "some", "my",
-            "for", "to", "on", "oz", "cup", "cups", "tbsp",
+            "for", "to", "on", "oz", "cup", "cups", "tbsp", "pint", "pints",
         ]
         return Set(text.lowercased().split { !$0.isLetter }.compactMap { raw in
             let token = String(raw)
@@ -500,6 +500,9 @@ enum FoodItemNaming {
         if let explicit = FoodQuantity.parseExplicitFluidOunces(in: text) {
             return explicit
         }
+        if let pints = FoodQuantity.pintFluidOunces(in: text) {
+            return pints
+        }
         guard FoodQuantity.looksLikeBeverage(text) else { return nil }
         return FoodQuantity.parseOunces(in: text)
     }
@@ -563,13 +566,41 @@ enum FoodItemNaming {
     }
 
     /// Keeps portion in the log label: "16 ounces of coconut milk" → "16 Oz Coconut Milk".
+    /// A pint stays "Pint of beer". Re-running this must not stack another "oz".
     private static func volumeLabel(from segment: String) -> String? {
         let lower = segment.lowercased()
-        guard let oz = parseFluidOunces(in: lower) else { return nil }
-        let food = sanitizeSegment(segment)
+        let food = foodNameWithoutMeasure(segment)
         guard !food.isEmpty else { return nil }
+        if lower.range(of: #"\bpints?\b"#, options: .regularExpression) != nil {
+            let pints = (FoodQuantity.pintFluidOunces(in: lower) ?? 16) / 16
+            if abs(pints - 1) < 0.05 { return titleCase("pint of \(food)") }
+            let count = pints == floor(pints) ? "\(Int(pints))" : String(format: "%g", pints)
+            return titleCase("\(count) pints of \(food)")
+        }
+        guard let oz = parseFluidOunces(in: lower) else { return nil }
         let ozText = oz == floor(oz) ? "\(Int(oz))" : String(format: "%g", oz)
         return titleCase("\(ozText) oz \(food)")
+    }
+
+    /// Drops measure words so "16 oz oz pint of beer" becomes "beer".
+    private static func foodNameWithoutMeasure(_ segment: String) -> String {
+        var food = sanitizeSegment(segment).lowercased()
+        let patterns = [
+            #"\d+(?:\.\d+)?\s*(?:fl\.?\s*)?(?:oz|ounces?)\b"#,
+            #"\bfl\.?\s*oz\b"#,
+            #"\bounces?\b"#,
+            #"\boz\b"#,
+            #"\bpints?\b"#,
+        ]
+        for pattern in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive) else { continue }
+            food = regex.stringByReplacingMatches(in: food, range: fullNSRange(for: food), withTemplate: " ")
+        }
+        food = collapseWhitespace(food)
+        while food.hasPrefix("of ") {
+            food = String(food.dropFirst(3)).trimmingCharacters(in: .whitespaces)
+        }
+        return food
     }
 
     /// Whole-token match so "chip" does not hit "chipotle".

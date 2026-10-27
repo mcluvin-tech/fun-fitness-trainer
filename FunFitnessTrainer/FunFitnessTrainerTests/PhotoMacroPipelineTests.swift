@@ -680,6 +680,78 @@ final class PhotoMacroPipelineTests: XCTestCase {
         })
     }
 
+    func testPintOfBeerUsesUSDANotCoffeeMacros() {
+        let meal = FoodAnalysisService.estimateOffline(from: "I had a pint of beer")
+        let entry = meal.entriesForLogging().first
+        XCTAssertEqual(entry?.calories ?? -1, 204, accuracy: 1)
+        XCTAssertEqual(entry?.proteinG ?? -1, 2.19, accuracy: 0.05)
+        XCTAssertEqual(entry?.carbsG ?? -1, 16.85, accuracy: 0.05)
+        XCTAssertEqual(entry?.fatG ?? -1, 0, accuracy: 0.01)
+        XCTAssertLessThan(entry?.proteinG ?? 99, 3, "A pint of beer must not use the 8 g coffee profile")
+        XCTAssertEqual(entry?.name.lowercased(), "pint of beer")
+    }
+
+    func testBeerLabelDoesNotStackOunces() {
+        let messy = "16 oz oz oz oz oz pint of beer"
+        let cleaned = FoodItemNaming.canonicalName(for: messy)
+        XCTAssertEqual(cleaned.lowercased(), "pint of beer")
+        var again = cleaned
+        for _ in 0..<5 {
+            again = FoodItemNaming.canonicalName(for: again)
+        }
+        XCTAssertEqual(again.lowercased(), "pint of beer")
+        XCTAssertFalse(again.lowercased().contains("oz"))
+    }
+
+    func testCanOfBeerIsTwelveOunces() {
+        let meal = FoodAnalysisService.estimateOffline(from: "I had a beer")
+        let entry = meal.entriesForLogging().first
+        XCTAssertEqual(entry?.calories ?? -1, 153, accuracy: 1)
+        XCTAssertEqual(entry?.proteinG ?? -1, 1.64, accuracy: 0.05)
+        XCTAssertEqual(entry?.carbsG ?? -1, 12.64, accuracy: 0.05)
+    }
+
+    func testCupOfSpinachIsNotCupOfRice() {
+        let spinach = FoodAnalysisService.estimateOffline(from: "I had a cup of spinach")
+        let rice = FoodAnalysisService.estimateOffline(from: "I had a cup of rice")
+        let spinachEntry = spinach.entriesForLogging().first
+        XCTAssertLessThan(spinachEntry?.calories ?? 999, 20)
+        XCTAssertGreaterThan(rice.calories, 180)
+        XCTAssertGreaterThan(rice.calories, (spinachEntry?.calories ?? 0) * 5)
+    }
+
+    func testTablespoonOfOilIsNotSalsa() {
+        let oil = FoodAnalysisService.estimateOffline(from: "I had a tablespoon of olive oil")
+        let salsa = FoodAnalysisService.estimateOffline(from: "I had a tablespoon of salsa")
+        XCTAssertEqual(oil.calories, 119, accuracy: 1)
+        XCTAssertLessThan(salsa.calories, 15)
+    }
+
+    func testPintOfBlondeBeerUsesAlcoholProfile() {
+        let meal = FoodAnalysisService.estimateOffline(from: "I had a pint of blonde beer")
+        XCTAssertGreaterThan(meal.calories, 180)
+        XCTAssertLessThan(meal.calories, 240)
+        XCTAssertLessThan(meal.proteinG, 3)
+        XCTAssertGreaterThan(meal.carbsG, 14)
+        XCTAssertLessThan(meal.carbsG, 22)
+    }
+
+    func testImplausibleSpinachIsRejected() {
+        let bogus = MealPayload(name: "1 cup spinach", calories: 180, proteinG: 8, carbsG: 20, fatG: 4, source: .genericEstimate)
+        let fixed = FoodAnalysisService.reconcileEstimate(bogus)
+        XCTAssertLessThan(fixed.calories, 20)
+        XCTAssertFalse(FoodEstimateGate.isPlausible(text: "1 cup spinach", calories: 180, proteinG: 2))
+        XCTAssertFalse(FoodEstimateGate.isPlausible(text: "6 oz chicken breast", calories: 80, proteinG: 12))
+        XCTAssertFalse(FoodEstimateGate.isPlausible(text: "a pint of beer", calories: 15, proteinG: 0))
+        XCTAssertFalse(FoodEstimateGate.isPlausible(text: "1 tbsp olive oil", calories: 20, proteinG: 0))
+    }
+
+    func testLatteIsStillACoffeeDrink() {
+        let meal = FoodAnalysisService.estimateOffline(from: "I had a latte")
+        XCTAssertEqual(meal.proteinG, 8, accuracy: 0.1)
+        XCTAssertEqual(meal.carbsG, 18, accuracy: 0.1)
+    }
+
     private func inMemoryContext() throws -> ModelContext {
         let schema = Schema([Meal.self, ExerciseLog.self, DailyGoal.self, TrainerPhrase.self, UserSettings.self])
         let container = try ModelContainer(

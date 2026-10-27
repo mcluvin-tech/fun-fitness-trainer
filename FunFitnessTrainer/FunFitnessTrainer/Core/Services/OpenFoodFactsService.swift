@@ -484,6 +484,18 @@ enum USDAFoodDataService {
         let terms = genericSearchTerms(from: query)
         guard !terms.isEmpty else { return nil }
         let tokens = wordTokens(terms)
+        // #region agent log
+        AgentDebugLog.emit(
+            hypothesisId: "B",
+            location: "USDAFoodDataService.lookupGeneric",
+            message: "USDA search terms",
+            data: [
+                "query": query,
+                "terms": terms,
+                "tokens": tokens.joined(separator: " "),
+            ]
+        )
+        // #endregion
         guard !tokens.isEmpty else { return nil }
 
         guard let foods = await searchFoods(query: terms, dataTypes: "Foundation,SR Legacy", pageSize: 15) else {
@@ -509,12 +521,22 @@ enum USDAFoodDataService {
         }
 
         guard let match = best else {
+            let preview = foods.prefix(5).map { food -> String in
+                let description = (food["description"] as? String) ?? ""
+                let score = genericMatchScore(description: description, queryTokens: tokens)
+                return "\(description)|\(score)"
+            }.joined(separator: " || ")
             // #region agent log
             AgentDebugLog.emit(
-                hypothesisId: "D",
+                hypothesisId: "B",
                 location: "USDAFoodDataService.lookupGeneric",
                 message: "no USDA description matched the food name",
-                data: ["terms": terms, "candidates": foods.count, "runId": "post-fix"]
+                data: [
+                    "terms": terms,
+                    "tokens": tokens.joined(separator: " "),
+                    "candidates": foods.count,
+                    "top": preview,
+                ]
             )
             // #endregion
             return nil
@@ -548,6 +570,8 @@ enum USDAFoodDataService {
         let ignored: Set<String> = [
             "raw", "cooked", "uncooked", "grilled", "baked", "roasted", "fried",
             "boiled", "steamed", "fresh", "organic", "plain", "homemade", "leftover",
+            "pint", "pints", "glass", "glasses", "bottle", "bottles", "can", "cans",
+            "shot", "shots", "ounce", "ounces", "cup", "cups",
         ]
         return wordTokens(source)
             .filter { !ignored.contains($0) }
@@ -560,7 +584,13 @@ enum USDAFoodDataService {
         let primary = lower.split(separator: ",").first
             .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) } ?? lower
         let primaryTokens = wordTokens(primary)
-        guard queryTokens.allSatisfy({ wholeWord($0, in: primary) }) else { return 0 }
+        if !queryTokens.allSatisfy({ wholeWord($0, in: primary) }) {
+            let segments = lower.split(separator: ",").map {
+                String($0).trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            let exactSegment = segments.contains { wordTokens($0) == queryTokens }
+            return exactSegment ? 0.9 : 0
+        }
         if primaryTokens == queryTokens { return 1 }
         let extras = primaryTokens.filter { !queryTokens.contains($0) }
         if extras.isEmpty { return 0.95 }
@@ -579,6 +609,10 @@ enum USDAFoodDataService {
         if let hit = matchingPortion(portion, in: portions) {
             let grams = hit.gramWeight * portion.amount / max(hit.amount, 0.01)
             return (grams, portion.amount, portion.unit.displayName, hit.modifier, false)
+        }
+        if portion.unit.isVolume, let ml = portion.unit.toMilliliters(portion.amount), ml > 0 {
+            let label = "\(formatAmount(portion.amount)) \(portion.unit.displayName)"
+            return (ml, portion.amount, portion.unit.displayName, label, false)
         }
         if portion.unit.isCountable {
             let preference = [

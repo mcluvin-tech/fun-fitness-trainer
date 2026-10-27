@@ -22,6 +22,9 @@ enum StapleNutritionDatabase {
         let notes: String
         /// Used only when the user/vision said "chicken" with no weight. Never 1 count / 100g.
         var defaultLoggedPortion: FoodPortion? = nil
+        /// Food-specific. A cup of spinach is not a cup of rice.
+        var gramsPerCup: Double? = nil
+        var gramsPerTablespoon: Double? = nil
 
         var perReference: MacroTotals {
             MacroTotals(calories: calories, proteinG: proteinG, carbsG: carbsG, fatG: fatG)
@@ -681,6 +684,180 @@ enum StapleNutritionDatabase {
         notes: "Plain ice is water. ~0 calories."
     )
 
+    /// 12 fl oz IPA. A US pint lands near 260 kcal — not a lager, and not a protein drink.
+    static let ipaBeer = Entry(
+        key: "ipa_beer",
+        aliases: ["ipa", "india pale ale"],
+        displayName: "IPA",
+        brand: nil,
+        displayUnit: "fl oz",
+        referenceQuantity: 12,
+        referenceUnit: .fluidOunce,
+        preparation: .unknown,
+        calories: 195,
+        proteinG: 2,
+        carbsG: 18,
+        fatG: 0,
+        source: .usda,
+        confidence: .medium,
+        barcode: nil,
+        notes: "Typical IPA, 12 fl oz. Alcohol calories are included (7 kcal/g). A pint is about 260 kcal."
+    )
+
+    /// 12 fl oz blonde ale. A US pint is about 210 kcal, 2 g protein, 18 g carbs.
+    static let blondeBeer = Entry(
+        key: "blonde_beer",
+        aliases: ["blonde ale", "blond ale", "blonde beer", "blond beer"],
+        displayName: "Blonde beer",
+        brand: nil,
+        displayUnit: "fl oz",
+        referenceQuantity: 12,
+        referenceUnit: .fluidOunce,
+        preparation: .unknown,
+        calories: 160,
+        proteinG: 1.2,
+        carbsG: 13.5,
+        fatG: 0,
+        source: .usda,
+        confidence: .medium,
+        barcode: nil,
+        notes: "Typical blonde ale, 12 fl oz. Alcohol calories are included. A pint is about 210 kcal, not a coffee drink."
+    )
+
+    /// USDA regular beer, 12 fl oz. A US pint is 16 fl oz (~204 kcal, ~2 g protein, ~17 g carbs).
+    static let regularBeer = Entry(
+        key: "regular_beer",
+        aliases: ["beer", "lager", "ipa", "pale ale", "pilsner", "stout"],
+        displayName: "Beer",
+        brand: nil,
+        displayUnit: "fl oz",
+        referenceQuantity: 12,
+        referenceUnit: .fluidOunce,
+        preparation: .unknown,
+        calories: 153,
+        proteinG: 1.64,
+        carbsG: 12.64,
+        fatG: 0,
+        source: .usda,
+        confidence: .medium,
+        barcode: nil,
+        notes: "USDA regular beer, 12 fl oz. A pint is 16 fl oz."
+    )
+
+    static let lightBeer = Entry(
+        key: "light_beer",
+        aliases: ["light beer", "lite beer"],
+        displayName: "Light beer",
+        brand: nil,
+        displayUnit: "fl oz",
+        referenceQuantity: 12,
+        referenceUnit: .fluidOunce,
+        preparation: .unknown,
+        calories: 103,
+        proteinG: 0.85,
+        carbsG: 5.81,
+        fatG: 0,
+        source: .usda,
+        confidence: .medium,
+        barcode: nil,
+        notes: "USDA light beer, 12 fl oz"
+    )
+
+    static let nonAlcoholicBeer = Entry(
+        key: "na_beer",
+        aliases: ["non-alcoholic beer", "nonalcoholic beer", "na beer"],
+        displayName: "Non-alcoholic beer",
+        brand: nil,
+        displayUnit: "fl oz",
+        referenceQuantity: 12,
+        referenceUnit: .fluidOunce,
+        preparation: .unknown,
+        calories: 70,
+        proteinG: 1,
+        carbsG: 12,
+        fatG: 0,
+        source: .usda,
+        confidence: .medium,
+        barcode: nil,
+        notes: "Typical non-alcoholic beer, 12 fl oz"
+    )
+
+    static let wineGlass = Entry(
+        key: "wine",
+        aliases: ["wine", "champagne", "prosecco"],
+        displayName: "Wine",
+        brand: nil,
+        displayUnit: "fl oz",
+        referenceQuantity: 5,
+        referenceUnit: .fluidOunce,
+        preparation: .unknown,
+        calories: 125,
+        proteinG: 0.1,
+        carbsG: 3.8,
+        fatG: 0,
+        source: .usda,
+        confidence: .medium,
+        barcode: nil,
+        notes: "USDA table wine, 5 fl oz glass"
+    )
+
+    static let sodaCan = Entry(
+        key: "soda",
+        aliases: ["soda", "cola", "coke", "pepsi", "sprite", "root beer", "ginger ale"],
+        displayName: "Soda",
+        brand: nil,
+        displayUnit: "fl oz",
+        referenceQuantity: 12,
+        referenceUnit: .fluidOunce,
+        preparation: .unknown,
+        calories: 140,
+        proteinG: 0,
+        carbsG: 39,
+        fatG: 0,
+        source: .manufacturer,
+        confidence: .medium,
+        barcode: nil,
+        notes: "Regular cola, 12 fl oz"
+    )
+
+    static let dietSodaCan = Entry(
+        key: "diet_soda",
+        aliases: ["diet soda", "diet coke", "coke zero", "diet cola", "zero sugar"],
+        displayName: "Diet soda",
+        brand: nil,
+        displayUnit: "fl oz",
+        referenceQuantity: 12,
+        referenceUnit: .fluidOunce,
+        preparation: .unknown,
+        calories: 0,
+        proteinG: 0,
+        carbsG: 0,
+        fatG: 0,
+        source: .manufacturer,
+        confidence: .medium,
+        barcode: nil,
+        notes: "Diet or zero-sugar soda, 12 fl oz"
+    )
+
+    static let spiritsShot = Entry(
+        key: "spirits",
+        aliases: ["whiskey", "whisky", "vodka", "tequila", "rum", "gin", "bourbon"],
+        displayName: "Liquor",
+        brand: nil,
+        displayUnit: "fl oz",
+        referenceQuantity: 1.5,
+        referenceUnit: .fluidOunce,
+        preparation: .unknown,
+        calories: 97,
+        proteinG: 0,
+        carbsG: 0,
+        fatG: 0,
+        source: .usda,
+        confidence: .medium,
+        barcode: nil,
+        notes: "USDA 80-proof distilled spirit, 1.5 fl oz shot"
+    )
+
     static let water = Entry(
         key: "water",
         aliases: ["tap water", "sparkling water", "seltzer"],
@@ -700,6 +877,193 @@ enum StapleNutritionDatabase {
         notes: "Plain water. ~0 calories."
     )
 
+    static let spinachRaw = per100g(
+        key: "spinach_raw",
+        aliases: ["spinach"],
+        name: "Spinach",
+        calories: 23, proteinG: 2.9, carbsG: 3.6, fatG: 0.4,
+        notes: "USDA raw spinach per 100 g. 1 cup is about 30 g, not a cup of rice.",
+        preparation: .raw,
+        gramsPerCup: 30,
+        defaultPortion: FoodPortion(amount: 1, unit: .cup, preparation: .raw)
+    )
+
+    static let spinachCooked = per100g(
+        key: "spinach_cooked",
+        aliases: ["cooked spinach", "sautéed spinach", "sauteed spinach"],
+        name: "Cooked spinach",
+        calories: 23, proteinG: 3, carbsG: 3.8, fatG: 0.3,
+        notes: "USDA cooked spinach per 100 g. 1 cup cooked is about 180 g.",
+        preparation: .cooked,
+        gramsPerCup: 180,
+        defaultPortion: FoodPortion(amount: 1, unit: .cup, preparation: .cooked)
+    )
+
+    static let broccoliCooked = per100g(
+        key: "broccoli_cooked",
+        aliases: ["broccoli"],
+        name: "Broccoli",
+        calories: 35, proteinG: 2.4, carbsG: 7.2, fatG: 0.4,
+        notes: "USDA cooked broccoli per 100 g. 1 cup is about 156 g.",
+        preparation: .cooked,
+        gramsPerCup: 156,
+        defaultPortion: FoodPortion(amount: 1, unit: .cup, preparation: .cooked)
+    )
+
+    static let potatoBaked = per100g(
+        key: "potato_baked",
+        aliases: ["potato", "baked potato", "potatoes"],
+        name: "Potato",
+        calories: 93, proteinG: 2.5, carbsG: 21, fatG: 0.1,
+        notes: "USDA baked potato per 100 g. One medium potato is about 173 g.",
+        preparation: .cooked,
+        gramsPerCup: 150,
+        defaultPortion: FoodPortion(amount: 173, unit: .gram, preparation: .cooked)
+    )
+
+    static let sweetPotatoBaked = per100g(
+        key: "sweet_potato",
+        aliases: ["sweet potato", "sweet potatoes"],
+        name: "Sweet potato",
+        calories: 90, proteinG: 2, carbsG: 21, fatG: 0.2,
+        notes: "USDA baked sweet potato per 100 g. One medium is about 114 g.",
+        preparation: .cooked,
+        defaultPortion: FoodPortion(amount: 114, unit: .gram, preparation: .cooked)
+    )
+
+    static let pastaCooked = per100g(
+        key: "pasta_cooked",
+        aliases: ["pasta", "spaghetti", "noodles", "macaroni"],
+        name: "Cooked pasta",
+        calories: 157, proteinG: 5.8, carbsG: 31, fatG: 0.9,
+        notes: "USDA cooked pasta per 100 g. 1 cup is about 140 g.",
+        preparation: .cooked,
+        gramsPerCup: 140,
+        defaultPortion: FoodPortion(amount: 1, unit: .cup, preparation: .cooked)
+    )
+
+    static let oatmealCooked = per100g(
+        key: "oatmeal_cooked",
+        aliases: ["oatmeal", "oats", "porridge"],
+        name: "Oatmeal",
+        calories: 71, proteinG: 2.5, carbsG: 12, fatG: 1.5,
+        notes: "USDA cooked oatmeal per 100 g. 1 cup is about 234 g.",
+        preparation: .cooked,
+        gramsPerCup: 234,
+        defaultPortion: FoodPortion(amount: 1, unit: .cup, preparation: .cooked)
+    )
+
+    static let wholeMilk = per100g(
+        key: "whole_milk",
+        aliases: ["whole milk", "milk"],
+        name: "Whole milk",
+        calories: 61, proteinG: 3.2, carbsG: 4.8, fatG: 3.3,
+        notes: "USDA whole milk per 100 g. 1 cup is about 244 g. Not a pint of beer.",
+        gramsPerCup: 244,
+        defaultPortion: FoodPortion(amount: 1, unit: .cup, preparation: .unknown)
+    )
+
+    static let skimMilk = per100g(
+        key: "skim_milk",
+        aliases: ["skim milk", "nonfat milk", "fat free milk"],
+        name: "Skim milk",
+        calories: 34, proteinG: 3.4, carbsG: 5, fatG: 0.1,
+        notes: "USDA skim milk per 100 g. 1 cup is about 245 g.",
+        gramsPerCup: 245,
+        defaultPortion: FoodPortion(amount: 1, unit: .cup, preparation: .unknown)
+    )
+
+    static let orangeJuice = per100g(
+        key: "orange_juice",
+        aliases: ["orange juice", "oj"],
+        name: "Orange juice",
+        calories: 45, proteinG: 0.7, carbsG: 10.4, fatG: 0.2,
+        notes: "USDA orange juice per 100 g. 1 cup is about 248 g.",
+        gramsPerCup: 248,
+        defaultPortion: FoodPortion(amount: 1, unit: .cup, preparation: .unknown)
+    )
+
+    static let sirloinCooked = per100g(
+        key: "sirloin_cooked",
+        aliases: ["steak", "sirloin", "ribeye", "filet"],
+        name: "Steak",
+        calories: 183, proteinG: 27, carbsG: 0, fatG: 8,
+        notes: "USDA cooked sirloin per 100 g. Unspecified steak uses 6 oz.",
+        preparation: .cooked,
+        defaultPortion: FoodPortion(amount: 6, unit: .ounce, preparation: .cooked)
+    )
+
+    static let turkeyBreastCooked = per100g(
+        key: "turkey_breast_cooked",
+        aliases: ["turkey breast", "turkey"],
+        name: "Turkey breast",
+        calories: 135, proteinG: 30, carbsG: 0, fatG: 0.7,
+        notes: "USDA cooked turkey breast per 100 g. Unspecified portion uses 6 oz.",
+        preparation: .cooked,
+        defaultPortion: FoodPortion(amount: 6, unit: .ounce, preparation: .cooked)
+    )
+
+    static let shrimpCooked = per100g(
+        key: "shrimp_cooked",
+        aliases: ["shrimp", "prawns"],
+        name: "Shrimp",
+        calories: 99, proteinG: 24, carbsG: 0.2, fatG: 0.3,
+        notes: "USDA cooked shrimp per 100 g. Unspecified portion uses 6 oz.",
+        preparation: .cooked,
+        defaultPortion: FoodPortion(amount: 6, unit: .ounce, preparation: .cooked)
+    )
+
+    static let tunaCanned = per100g(
+        key: "tuna_canned",
+        aliases: ["tuna"],
+        name: "Tuna",
+        calories: 86, proteinG: 19, carbsG: 0, fatG: 1,
+        notes: "USDA canned tuna in water per 100 g. Unspecified can uses 4 oz drained.",
+        defaultPortion: FoodPortion(amount: 4, unit: .ounce, preparation: .unknown)
+    )
+
+    static let greenBeansCooked = per100g(
+        key: "green_beans",
+        aliases: ["green beans"],
+        name: "Green beans",
+        calories: 35, proteinG: 1.9, carbsG: 7.9, fatG: 0.3,
+        notes: "USDA cooked green beans per 100 g. 1 cup is about 125 g. Not black beans.",
+        preparation: .cooked,
+        gramsPerCup: 125,
+        defaultPortion: FoodPortion(amount: 1, unit: .cup, preparation: .cooked)
+    )
+
+    static let blackBeansCooked = per100g(
+        key: "black_beans",
+        aliases: ["black beans", "beans"],
+        name: "Beans",
+        calories: 132, proteinG: 8.9, carbsG: 24, fatG: 0.5,
+        notes: "USDA cooked black beans per 100 g. 1 cup is about 172 g.",
+        preparation: .cooked,
+        gramsPerCup: 172,
+        defaultPortion: FoodPortion(amount: 1, unit: .cup, preparation: .cooked)
+    )
+
+    static let salsa = per100g(
+        key: "salsa",
+        aliases: ["salsa"],
+        name: "Salsa",
+        calories: 36, proteinG: 1.5, carbsG: 7, fatG: 0.2,
+        notes: "USDA salsa per 100 g. 1 tablespoon is about 16 g, not a tablespoon of oil.",
+        gramsPerTablespoon: 16,
+        defaultPortion: FoodPortion(amount: 2, unit: .tablespoon, preparation: .unknown)
+    )
+
+    static let cottageCheese = per100g(
+        key: "cottage_cheese",
+        aliases: ["cottage cheese"],
+        name: "Cottage cheese",
+        calories: 72, proteinG: 12.4, carbsG: 2.7, fatG: 1,
+        notes: "USDA low-fat cottage cheese per 100 g. 1 cup is about 226 g.",
+        gramsPerCup: 226,
+        defaultPortion: FoodPortion(amount: 1, unit: .cup, preparation: .unknown)
+    )
+
     /// Ordered most-specific first so "Dave's thin" wins over generic bread.
     static let allEntries: [Entry] = [
         davesThinSliced,
@@ -714,6 +1078,33 @@ enum StapleNutritionDatabase {
         soyMilkCup,
         ice,
         water,
+        lightBeer,
+        nonAlcoholicBeer,
+        ipaBeer,
+        blondeBeer,
+        regularBeer,
+        wineGlass,
+        dietSodaCan,
+        sodaCan,
+        spiritsShot,
+        spinachCooked,
+        spinachRaw,
+        broccoliCooked,
+        sweetPotatoBaked,
+        potatoBaked,
+        pastaCooked,
+        oatmealCooked,
+        skimMilk,
+        wholeMilk,
+        orangeJuice,
+        sirloinCooked,
+        turkeyBreastCooked,
+        shrimpCooked,
+        tunaCanned,
+        greenBeansCooked,
+        blackBeansCooked,
+        salsa,
+        cottageCheese,
         sourdoughSlice,
         largeEgg,
         peanutButterTbsp,
@@ -790,12 +1181,11 @@ enum StapleNutritionDatabase {
             }
         }
 
-        let factor = FoodQuantity.multiplier(
-            consumed: usedPortion,
-            referenceQuantity: entry.referenceQuantity,
-            referenceUnit: entry.referenceUnit
-        )
+        let factor = foodSpecificFactor(entry: entry, portion: usedPortion)
         let totals = entry.perReference.scaled(by: factor)
+        let explicitMass = usedPortion.unit.isMass && !usedDefaultPortion
+        let (score, reason) = confidenceScore(entry: entry, usedDefaultPortion: usedDefaultPortion, explicitMass: explicitMass)
+        assumptions.append("confidence_score: \(score). \(reason)")
         return ScaledResult(
             entry: entry,
             portion: usedPortion,
@@ -804,6 +1194,77 @@ enum StapleNutritionDatabase {
             inferredPreparation: inferredPrep,
             usedDefaultPortion: usedDefaultPortion,
             assumptions: assumptions
+        )
+    }
+
+    /// Cup and tablespoon weights belong to the food. 1 cup spinach ≠ 1 cup rice.
+    private static func foodSpecificFactor(entry: Entry, portion: FoodPortion) -> Double {
+        if entry.referenceUnit == .gram {
+            if portion.unit == .cup, let grams = entry.gramsPerCup, grams > 0 {
+                return MacroTrackingEngine.multiplier(consumed: grams * portion.amount, reference: entry.referenceQuantity)
+            }
+            if portion.unit == .tablespoon, let grams = entry.gramsPerTablespoon, grams > 0 {
+                return MacroTrackingEngine.multiplier(consumed: grams * portion.amount, reference: entry.referenceQuantity)
+            }
+        }
+        return FoodQuantity.multiplier(
+            consumed: portion,
+            referenceQuantity: entry.referenceQuantity,
+            referenceUnit: entry.referenceUnit
+        )
+    }
+
+    private static func confidenceScore(
+        entry: Entry,
+        usedDefaultPortion: Bool,
+        explicitMass: Bool
+    ) -> (Int, String) {
+        if entry.source.isExact {
+            return (98, "Verified label or restaurant nutrition.")
+        }
+        if explicitMass {
+            return (93, "USDA per 100 g scaled by the stated weight for this food.")
+        }
+        if usedDefaultPortion {
+            return (82, "Standard serving for this food. No scale weight was given.")
+        }
+        return (88, "This food's own reference, scaled to the stated portion.")
+    }
+
+    private static func per100g(
+        key: String,
+        aliases: [String],
+        name: String,
+        calories: Double,
+        proteinG: Double,
+        carbsG: Double,
+        fatG: Double,
+        notes: String,
+        preparation: MacroTrackingEngine.PreparationState = .unknown,
+        gramsPerCup: Double? = nil,
+        gramsPerTablespoon: Double? = nil,
+        defaultPortion: FoodPortion? = nil
+    ) -> Entry {
+        Entry(
+            key: key,
+            aliases: aliases,
+            displayName: name,
+            brand: nil,
+            displayUnit: defaultPortion?.unit.displayName.isEmpty == false ? defaultPortion!.unit.displayName : "g",
+            referenceQuantity: 100,
+            referenceUnit: .gram,
+            preparation: preparation,
+            calories: calories,
+            proteinG: proteinG,
+            carbsG: carbsG,
+            fatG: fatG,
+            source: .usda,
+            confidence: .medium,
+            barcode: nil,
+            notes: notes,
+            defaultLoggedPortion: defaultPortion,
+            gramsPerCup: gramsPerCup,
+            gramsPerTablespoon: gramsPerTablespoon
         )
     }
 
@@ -860,6 +1321,9 @@ enum StapleNutritionDatabase {
         if looksLikePlainWater(haystack) {
             return water
         }
+        if let drink = drinkEntry(for: haystack) {
+            return drink
+        }
 
         if matchesToken(haystack, "carrot") || haystack.contains("carrots") {
             return portion.unit == .cup ? carrotCup : carrotMedium
@@ -887,6 +1351,21 @@ enum StapleNutritionDatabase {
                 || haystack.contains("almond milk") || haystack.contains("oat milk") {
                 continue
             }
+            if entry.key == "black_beans", haystack.contains("jelly") || haystack.contains("green bean") {
+                continue
+            }
+            if entry.key == "whole_milk" || entry.key == "skim_milk" {
+                if haystack.contains("almond") || haystack.contains("oat") || haystack.contains("soy")
+                    || haystack.contains("coconut") || haystack.contains("chocolate") || haystack.contains("fairlife") {
+                    continue
+                }
+            }
+            if entry.key == "spinach_raw", haystack.contains("cooked") || haystack.contains("sauté") || haystack.contains("saute") {
+                continue
+            }
+            if entry.key == "potato_baked", haystack.contains("sweet potato") || haystack.contains("chip") {
+                continue
+            }
             if entry.key == "olive_oil_tbsp", haystack.contains("olive oil") {
                 return entry
             }
@@ -902,6 +1381,47 @@ enum StapleNutritionDatabase {
                     return entry
                 }
             }
+        }
+        return nil
+    }
+
+    /// Alcohol and soda. Root beer and ginger ale are soda, not beer. Coffee stays out of this list.
+    private static func drinkEntry(for text: String) -> Entry? {
+        if text.contains("espresso") || text.contains("coffee") || text.contains("latte")
+            || text.contains("cappuccino") || text.contains("frappuccino") {
+            return nil
+        }
+        let sodaName = text.contains("soda") || text.contains("cola") || matchesToken(text, "coke")
+            || text.contains("pepsi") || text.contains("sprite") || text.contains("root beer")
+            || text.contains("ginger ale") || text.contains("ginger beer")
+        if sodaName, text.contains("diet") || text.contains("zero sugar") || text.contains("coke zero") {
+            return dietSodaCan
+        }
+        if sodaName { return sodaCan }
+        if text.contains("non-alcoholic") || text.contains("nonalcoholic")
+            || text.contains("na beer") || text.contains("n/a beer") || text.contains("zero alcohol") {
+            if matchesToken(text, "beer") { return nonAlcoholicBeer }
+        }
+        if text.contains("light beer") || text.contains("lite beer") || text.contains("bud light")
+            || text.contains("coors light") || text.contains("miller lite") || text.contains("michelob ultra") {
+            return lightBeer
+        }
+        if text.contains("ipa") { return ipaBeer }
+        if (text.contains("blonde") || text.contains("blond"))
+            && (matchesToken(text, "beer") || matchesToken(text, "ale")) {
+            return blondeBeer
+        }
+        if matchesToken(text, "beer") || text.contains("lager") || text.contains("pilsner")
+            || matchesToken(text, "ale") || text.contains("stout") {
+            return regularBeer
+        }
+        if matchesToken(text, "wine") || text.contains("champagne") || text.contains("prosecco") {
+            return wineGlass
+        }
+        if text.contains("whiskey") || text.contains("whisky") || text.contains("vodka")
+            || text.contains("tequila") || matchesToken(text, "rum") || matchesToken(text, "gin")
+            || text.contains("bourbon") {
+            return spiritsShot
         }
         return nil
     }

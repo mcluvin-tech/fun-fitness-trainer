@@ -519,6 +519,12 @@ enum FoodAnalysisService {
               let offline = estimateForStoredName(name) else {
             var copy = entry
             copy.name = name
+            if !FoodEstimateGate.isPlausible(text: name, calories: copy.calories, proteinG: copy.proteinG) {
+                let replacement = estimateOffline(from: name)
+                var fixed = replacement.entriesForLogging().first ?? replacement
+                fixed.assumptions.append("Rejected an implausible estimate for this food and used its own reference.")
+                return fixed
+            }
             return copy
         }
         return MealPayload(
@@ -596,6 +602,50 @@ enum FoodAnalysisService {
         }
 
         return reconcileEstimate(payload)
+    }
+
+    /// "A pint of beer" must scale from the words the user said, even if the model logged plain "beer".
+    static func applyingSpokenPortions(_ meal: MealPayload, utterance: String) -> MealPayload {
+        let segments = foodSegments(from: utterance)
+        guard !segments.isEmpty else { return meal }
+
+        if meal.lineItems.isEmpty {
+            guard segments.count == 1, let scaled = StapleNutritionDatabase.scale(for: segments[0]) else {
+                return meal
+            }
+            let label = FoodItemNaming.logLabel(from: segments[0], quantity: scaled.portion.amount)
+            return payload(from: scaled, fallbackName: label, barcode: meal.barcode)
+        }
+
+        let items = meal.lineItems.map { item -> MealLineItem in
+            guard let segment = segments.first(where: { FoodItemNaming.refersToSameFood($0, item.name) }),
+                  let scaled = StapleNutritionDatabase.scale(for: segment) else {
+                return item
+            }
+            let label = FoodItemNaming.logLabel(from: segment, quantity: scaled.portion.amount)
+            return lineItem(from: scaled, name: label)
+        }
+        let totals = MacroTrackingEngine.recipeTotals(items.map {
+            MacroTotals(calories: $0.calories, proteinG: $0.proteinG, carbsG: $0.carbsG, fatG: $0.fatG)
+        })
+        return MealPayload(
+            name: meal.name,
+            calories: totals.calories,
+            proteinG: totals.proteinG,
+            carbsG: totals.carbsG,
+            fatG: totals.fatG,
+            items: meal.items,
+            lineItems: items,
+            barcode: meal.barcode,
+            isLabelBacked: meal.isLabelBacked,
+            assumptions: meal.assumptions,
+            quantity: meal.quantity,
+            unit: meal.unit,
+            preparationState: meal.preparationState,
+            brand: meal.brand,
+            source: meal.source,
+            confidence: meal.confidence
+        )
     }
 
     /// Adds foods the user named that a partial model reply left out.
@@ -879,10 +929,37 @@ enum FoodAnalysisService {
             return genericItem(name: name, calories: 450, proteinG: 28, carbsG: 40, fatG: 18, quantity: max(portion.amount, 1), confidence: .low)
         }
         if let scaled = StapleNutritionDatabase.scale(for: segment) {
+            let drinkKeys: Set<String> = [
+                "regular_beer", "light_beer", "na_beer", "wine", "soda", "diet_soda", "spirits",
+            ]
+            if drinkKeys.contains(scaled.entry.key) {
+                // #region agent log
+                AgentDebugLog.emit(
+                    hypothesisId: "A",
+                    location: "FoodAnalysisService.estimateSegment",
+                    message: "drink scaled from staple",
+                    data: [
+                        "segment": segment,
+                        "key": scaled.entry.key,
+                        "portion": FoodQuantity.describe(scaled.portion),
+                        "multiplier": scaled.multiplier,
+                        "calories": scaled.totals.calories,
+                        "protein": scaled.totals.proteinG,
+                        "carbs": scaled.totals.carbsG,
+                        "fat": scaled.totals.fatG,
+                        "runId": "post-fix",
+                    ]
+                )
+                // #endregion
+            }
             return lineItem(from: scaled, name: name)
         }
         if sourceLower.contains("salad") {
-            return genericItem(name: name, calories: 320, proteinG: 28, carbsG: 18, fatG: 14, quantity: max(portion.amount, 1), confidence: .low)
+            let hearty = ["chicken", "tuna", "salmon", "steak", "shrimp", "egg"].contains { sourceLower.contains($0) }
+            if hearty {
+                return genericItem(name: name, calories: 420, proteinG: 32, carbsG: 16, fatG: 16, quantity: max(portion.amount, 1), confidence: .low)
+            }
+            return genericItem(name: name, calories: 150, proteinG: 4, carbsG: 12, fatG: 8, quantity: max(portion.amount, 1), confidence: .low)
         }
         if sourceLower.contains("burger") || sourceLower.contains("pizza") || sourceLower.contains("mcdonald") {
             return genericItem(
@@ -903,36 +980,64 @@ enum FoodAnalysisService {
         }
         if isCoffeeDrink(FoodItemNaming.sanitizeSegment(segment).lowercased()) || sourceLower.contains("starbucks") {
             let drinkQty = portion.unit.isVolume ? 1 : max(portion.amount, 1)
-            return estimateCoffeeDrink(name: name, text: sourceLower, sourceLower: sourceLower, quantity: drinkQty)
+            let drink = estimateCoffeeDrink(name: name, text: sourceLower, sourceLower: sourceLower, quantity: drinkQty)
+            // #region agent log
+            AgentDebugLog.emit(
+                hypothesisId: "A",
+                location: "FoodAnalysisService.estimateSegment",
+                message: "beverage routed through coffee estimator",
+                data: [
+                    "segment": segment,
+                    "isBeer": sourceLower.contains("beer"),
+                    "isWine": sourceLower.contains("wine"),
+                    "portionUnit": String(describing: portion.unit),
+                    "portionAmount": portion.amount,
+                    "drinkQty": drinkQty,
+                    "calories": drink.calories,
+                    "protein": drink.proteinG,
+                    "carbs": drink.carbsG,
+                    "fat": drink.fatG,
+                ]
+            )
+            // #endregion
+            return drink
         }
 
-        if portion.unit.isVolume {
-            let cups = portion.unit.toMilliliters(portion.amount).map { max($0 / FoodUnit.mlPerCup, 0.25) } ?? max(portion.amount, 0.25)
-            return genericItem(name: name, calories: 50, proteinG: 1, carbsG: 4, fatG: 2.5, quantity: cups, unit: "cup", confidence: .low)
-        }
+        return unidentifiedFoodItem(name: name, segment: segment, portion: portion)
+    }
 
+    /// Last resort after the food itself has no reference. Never copy another food's cup or pint.
+    private static func unidentifiedFoodItem(name: String, segment: String, portion: FoodPortion) -> MealLineItem {
+        let lower = segment.lowercased()
         // #region agent log
         AgentDebugLog.emit(
             hypothesisId: "A",
-            location: "FoodAnalysisService.estimateSegment",
-            message: "generic 200/10 fallback",
+            location: "FoodAnalysisService.unidentifiedFoodItem",
+            message: "no food identity match",
             data: [
                 "segment": segment,
-                "name": name,
-                "portionAmount": portion.amount,
                 "portionUnit": String(describing: portion.unit),
-                "stapleMatch": StapleNutritionDatabase.match(in: segment) != nil,
+                "portionAmount": portion.amount,
             ]
         )
         // #endregion
+        let leafy = ["lettuce", "kale", "arugula", "cucumber", "zucchini", "asparagus", "greens"]
+        if leafy.contains(where: { lower.contains($0) }) {
+            let cups = portion.unit == .cup ? max(portion.amount, 0.5) : 1
+            return genericItem(name: name, calories: 15, proteinG: 1.2, carbsG: 2.5, fatG: 0.2, quantity: cups, unit: "cup", confidence: .low)
+        }
+        if ["pork", "lamb", "brisket"].contains(where: { lower.contains($0) }) {
+            let oz = portion.unit == .ounce ? portion.amount : 6
+            return genericItem(name: name, calories: 60, proteinG: 7, carbsG: 0, fatG: 3.5, quantity: oz, unit: "oz", confidence: .low)
+        }
         return genericItem(
             name: name,
-            calories: 200,
-            proteinG: 10,
-            carbsG: 15,
-            fatG: 8,
-            quantity: max(portion.amount, 1),
-            unit: portion.unit.displayName.isEmpty ? "serving" : portion.unit.displayName,
+            calories: 280,
+            proteinG: 8,
+            carbsG: 30,
+            fatG: 10,
+            quantity: 1,
+            unit: "serving",
             confidence: .low
         )
     }
@@ -1012,8 +1117,18 @@ enum FoodAnalysisService {
         )
     }
 
+    /// Coffee only. Beer, wine, and soda used to land here and inherit a latte (8 g protein, 18 g carbs).
     private static func isCoffeeDrink(_ text: String) -> Bool {
-        FoodItemNaming.isBeverage(text)
+        let coffee = [
+            "latte", "coffee", "espresso", "cappuccino", "mocha", "frappuccino",
+            "macchiato", "americano", "cold brew", "cortado",
+        ]
+        if coffee.contains(where: { text.contains($0) }) { return true }
+        // Speech-to-text often hears "latte" as "late".
+        if text.contains("late"), text.contains("vanilla") || text.contains("skinny") || text.contains("starbucks") {
+            return !text.contains("chocolate")
+        }
+        return false
     }
 
     /// Starbucks-style drinks — sugar-free skinny vs full-fat specialty.
@@ -1259,9 +1374,56 @@ extension FoodAnalysisService {
     }
 }
 
+enum FoodEstimateGate {
+    /// Rejects numbers that cannot belong to this food, even if the serving word matches something else.
+    static func isPlausible(text: String, calories: Double, proteinG: Double) -> Bool {
+        let lower = text.lowercased()
+        let portion = FoodQuantity.parse(from: lower)
+        if isAlcohol(lower) {
+            let ounces = FoodQuantity.pintFluidOunces(in: lower)
+                ?? (portion.unit == .fluidOunce ? portion.amount : 12)
+            if ounces >= 10, calories < 50 || proteinG > 6 { return false }
+            if calories > 550 { return false }
+        }
+        if lower.contains("olive oil") || (lower.contains("butter") && !lower.contains("peanut") && !lower.contains("almond")) {
+            let tablespoons = portion.unit == .tablespoon ? max(portion.amount, 1) : 1
+            if calories < 70 * tablespoons * 0.6 { return false }
+        }
+        if lower.contains("salsa"), portion.unit == .tablespoon, calories > 25 * max(portion.amount, 1) {
+            return false
+        }
+        if isLeafy(lower) {
+            let cups = portion.unit == .cup ? max(portion.amount, 1) : 1
+            if calories > 80 * cups { return false }
+        }
+        if isLeanMeat(lower) {
+            let ounces: Double
+            if portion.unit == .ounce { ounces = portion.amount }
+            else if portion.unit == .gram { ounces = portion.amount / FoodUnit.gramsPerOunce }
+            else { ounces = 0 }
+            if ounces >= 3, proteinG < ounces * 4 { return false }
+        }
+        return calories > 0 || proteinG > 0 || lower.contains("water") || lower.contains("diet")
+    }
+
+    private static func isAlcohol(_ text: String) -> Bool {
+        ["beer", "ale", "ipa", "lager", "wine", "whiskey", "whisky", "vodka", "tequila", "bourbon"].contains {
+            text.contains($0)
+        }
+    }
+
+    private static func isLeafy(_ text: String) -> Bool {
+        ["spinach", "lettuce", "kale", "arugula"].contains { text.contains($0) }
+    }
+
+    private static func isLeanMeat(_ text: String) -> Bool {
+        ["chicken", "turkey breast", "steak", "sirloin", "shrimp"].contains { text.contains($0) }
+    }
+}
+
 enum AgentDebugLog {
-    private static let sessionId = "df7d56"
-    private static let logPath = "/Users/lukeeidsvold/Social Media Guru/exports/Fun Fitness Trainer/.cursor/debug-df7d56.log"
+    private static let sessionId = "978dd6"
+    private static let logPath = "/Users/lukeeidsvold/Social Media Guru/exports/Fun Fitness Trainer/.cursor/debug-978dd6.log"
     private static let endpoints = [
         "http://127.0.0.1:7417/ingest/1f1eb15b-5e96-4046-891c-3aaf57988060",
         "http://192.168.1.39:7417/ingest/1f1eb15b-5e96-4046-891c-3aaf57988060",

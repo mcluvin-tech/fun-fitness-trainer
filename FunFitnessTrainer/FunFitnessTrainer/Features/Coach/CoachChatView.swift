@@ -54,8 +54,7 @@ struct CoachChatView: View {
     @State private var dismissAfterReply = false
     @State private var dinnerPlates: [TrainerService.DinnerPlate] = []
     @State private var dinnerHeader = ""
-    /// Temporary on-screen path so we can verify which branch ran without Mac logs.
-    @State private var debugPathLabel = ""
+    @State private var platesAppeared = false
 
     private var todayMeals: [Meal] {
         DaySummaryService.mealsToday(from: allMeals)
@@ -162,33 +161,40 @@ struct CoachChatView: View {
 
     var body: some View {
         ZStack {
-            HomeDarkBackground()
+            coachBackground
 
             VStack(spacing: 0) {
                 topBar
                     .padding(.horizontal, 16)
                     .padding(.top, 8)
 
-                if !debugPathLabel.isEmpty {
-                    Text(debugPathLabel)
-                        .font(.caption2.monospaced())
-                        .foregroundStyle(BrandTheme.teal)
-                        .padding(.horizontal, 16)
-                        .padding(.top, 4)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-
-                if phase == .reply, !dinnerPlates.isEmpty {
-                    dinnerOptionsPanel
-                        .padding(.horizontal, 16)
-                        .padding(.top, 8)
-                        .layoutPriority(1)
-                } else {
-                    Spacer(minLength: 8)
-                    larryStage
-                        .padding(.horizontal, 20)
-                        .layoutPriority(1)
-                    Spacer(minLength: 12)
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        VStack(spacing: 0) {
+                            if phase == .reply, !dinnerPlates.isEmpty {
+                                dinnerOptionsPanel
+                                    .padding(.horizontal, 16)
+                                    .padding(.top, 10)
+                                    .id("conversationTop")
+                            } else {
+                                larryStage
+                                    .padding(.horizontal, 20)
+                                    .padding(.top, 12)
+                                    .frame(maxWidth: .infinity)
+                                    .frame(minHeight: keyboardOverlap > 0 ? 220 : 360)
+                                    .id("conversationTop")
+                            }
+                            Color.clear.frame(height: 12).id("conversationBottom")
+                        }
+                        .frame(maxWidth: .infinity)
+                    }
+                    .scrollDismissesKeyboard(.interactively)
+                    .scrollIndicators(.hidden)
+                    .onChange(of: dinnerPlates.count) { _, _ in
+                        withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
+                            proxy.scrollTo("conversationTop", anchor: .top)
+                        }
+                    }
                 }
 
                 voiceInputBar
@@ -223,6 +229,13 @@ struct CoachChatView: View {
         .onChange(of: showKeyboard) { _, show in
             composerFocused = show
         }
+        .onChange(of: dinnerPlates) { _, plates in
+            platesAppeared = false
+            guard !plates.isEmpty else { return }
+            withAnimation(.spring(response: 0.38, dampingFraction: 0.78).delay(0.05)) {
+                platesAppeared = true
+            }
+        }
         .alert("Voice unavailable", isPresented: .init(
             get: { voice.permissionDenied },
             set: { _ in }
@@ -232,6 +245,28 @@ struct CoachChatView: View {
             Text("Enable Microphone and Speech Recognition for Larry in Settings → \(LarryMcQuade.appName).")
         }
         .sensoryFeedback(.impact(flexibility: .solid, intensity: 0.8), trigger: phase)
+    }
+
+    /// Quieter coach-only backdrop so conversation hierarchy reads first.
+    private var coachBackground: some View {
+        ZStack {
+            Color(red: 0.03, green: 0.02, blue: 0.06)
+            LinearGradient(
+                colors: [
+                    Color(red: 0.08, green: 0.04, blue: 0.14),
+                    Color(red: 0.03, green: 0.02, blue: 0.07),
+                ],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+            RadialGradient(
+                colors: [BrandTheme.purple.opacity(0.14), .clear],
+                center: .top,
+                startRadius: 24,
+                endRadius: 420
+            )
+        }
+        .ignoresSafeArea()
     }
 
     private var topBar: some View {
@@ -277,47 +312,98 @@ struct CoachChatView: View {
     }
 
     private var dinnerOptionsPanel: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .top, spacing: 12) {
-                LarryHeroImage(pose: activePose, maxHeight: 72)
-                    .frame(width: 72, height: 72)
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .center, spacing: 14) {
+                LarryHeroImage(pose: activePose, maxHeight: 124)
+                    .frame(width: 112, height: 124)
+                    .modifier(
+                        LarryEntranceMotion(
+                            motion: LarryReactionMotion.forEmotion(replyEmotion),
+                            replayID: dinnerHeader.isEmpty ? larryReply : dinnerHeader
+                        )
+                    )
+                    .accessibilityHidden(true)
+
                 Text(dinnerHeader.isEmpty ? larryReply : dinnerHeader)
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(BrandTheme.homePrimaryText)
                     .fixedSize(horizontal: false, vertical: true)
+                    .transition(.asymmetric(
+                        insertion: .move(edge: .leading).combined(with: .opacity),
+                        removal: .opacity
+                    ))
             }
+            .padding(.bottom, 2)
 
-            ScrollView {
-                VStack(spacing: 10) {
-                    ForEach(dinnerPlates) { plate in
-                        Button {
-                            pickDinnerPlate(plate)
-                        } label: {
-                            VStack(alignment: .leading, spacing: 6) {
-                                Text(plate.name)
-                                    .font(.headline.weight(.bold))
-                                    .foregroundStyle(BrandTheme.homePrimaryText)
-                                    .multilineTextAlignment(.leading)
-                                Text("\(plate.calories) cal · \(plate.protein)g protein · \(plate.carbs)g carbs · \(plate.fat)g fat")
-                                    .font(.caption.weight(.semibold))
-                                    .foregroundStyle(BrandTheme.teal)
-                            }
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(14)
-                            .background {
-                                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                                    .fill(BrandTheme.homeCardSolid)
-                                    .overlay(
-                                        RoundedRectangle(cornerRadius: 16, style: .continuous)
-                                            .stroke(BrandTheme.homeCardBorder, lineWidth: 1)
-                                    )
-                            }
-                        }
-                        .buttonStyle(.plain)
-                    }
+            VStack(spacing: 8) {
+                ForEach(Array(dinnerPlates.enumerated()), id: \.element.id) { index, plate in
+                    dinnerPlateCard(plate)
+                        .opacity(platesAppeared ? 1 : 0)
+                        .offset(y: platesAppeared ? 0 : 14)
+                        .animation(
+                            .spring(response: 0.38, dampingFraction: 0.78)
+                                .delay(Double(index) * 0.055),
+                            value: platesAppeared
+                        )
                 }
             }
         }
+    }
+
+    private func dinnerPlateCard(_ plate: TrainerService.DinnerPlate) -> some View {
+        Button {
+            HomeHaptics.soft()
+            pickDinnerPlate(plate)
+        } label: {
+            HStack(alignment: .center, spacing: 12) {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(plate.name)
+                        .font(.subheadline.weight(.bold))
+                        .foregroundStyle(BrandTheme.homePrimaryText)
+                        .multilineTextAlignment(.leading)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Text("\(plate.calories) cal")
+                            .font(.subheadline.weight(.bold))
+                            .foregroundStyle(BrandTheme.teal)
+                        Text("\(plate.protein)g protein")
+                            .font(.subheadline.weight(.bold))
+                            .foregroundStyle(BrandTheme.teal)
+                        Text("\(plate.carbs)g C · \(plate.fat)g F")
+                            .font(.caption2.weight(.medium))
+                            .foregroundStyle(BrandTheme.homeTertiaryText)
+                    }
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.85)
+                }
+
+                Spacer(minLength: 4)
+
+                VStack(spacing: 2) {
+                    Image(systemName: "chevron.right")
+                        .font(.caption.weight(.bold))
+                        .foregroundStyle(BrandTheme.teal.opacity(0.9))
+                    Text("Log this")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(BrandTheme.homeSecondaryText)
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 12)
+            .background {
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(BrandTheme.homeCardSolid.opacity(0.92))
+                    .shadow(color: BrandTheme.purple.opacity(0.18), radius: 14, y: 6)
+                    .shadow(color: .black.opacity(0.28), radius: 6, y: 3)
+            }
+            .overlay {
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .stroke(Color.white.opacity(0.06), lineWidth: 0.5)
+            }
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("\(plate.name), \(plate.calories) calories, \(plate.protein) grams protein. Log this.")
     }
 
     private var larryStage: some View {
@@ -401,11 +487,12 @@ struct CoachChatView: View {
     }
 
     private var voiceInputBar: some View {
-        VStack(spacing: 12) {
+        VStack(spacing: 10) {
             if let voiceError {
                 Text(voiceError)
                     .font(.caption)
                     .foregroundStyle(.red)
+                    .padding(.horizontal, 4)
             }
 
             if phase == .reply, dismissAfterReply {
@@ -431,7 +518,7 @@ struct CoachChatView: View {
                     .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                 }
                 .buttonStyle(.plain)
-                .padding(.horizontal, 28)
+                .padding(.horizontal, 12)
                 .accessibilityLabel("Done")
                 .transition(.move(edge: .bottom).combined(with: .opacity))
 
@@ -445,101 +532,20 @@ struct CoachChatView: View {
                 .buttonStyle(.plain)
                 .transition(.opacity)
             } else {
-                HStack(spacing: 18) {
-                    Button {
-                        showKeyboard.toggle()
-                    } label: {
-                        Image(systemName: showKeyboard ? "mic.fill" : "keyboard")
-                            .font(.title3)
-                            .foregroundStyle(BrandTheme.homeTertiaryText)
-                            .frame(width: 44, height: 44)
-                    }
-                    .accessibilityLabel(showKeyboard ? "Use voice" : "Type instead")
-
-                    Button(action: micTapped) {
-                        ZStack {
-                            if voice.isRecording {
-                                Circle()
-                                    .stroke(Color.red.opacity(0.35), lineWidth: 8)
-                                    .frame(width: 92, height: 92)
-                                    .scaleEffect(bounce ? 1.08 : 0.92)
-                            }
-                            Circle()
-                                .fill(micButtonColor)
-                                .frame(width: 76, height: 76)
-                            Image(systemName: micIconName)
-                                .font(.title)
-                                .foregroundStyle(.white)
-                        }
-                    }
-                    .disabled(!voice.isReady || isLoading)
-                    .accessibilityLabel(voice.isRecording ? "Stop and send" : "Talk to Larry")
-
-                    Color.clear.frame(width: 44, height: 44)
-                }
-
-                if showKeyboard {
-                    HStack(alignment: .bottom, spacing: 10) {
-                        TextField("Type to Larry…", text: $input, axis: .vertical)
-                            .focused($composerFocused)
-                            .font(.body.weight(.semibold))
-                            .foregroundStyle(BrandTheme.homePrimaryText)
-                            .tint(BrandTheme.teal)
-                            .lineLimit(1...4)
-                            .submitLabel(.send)
-                            .onSubmit { sendUser(input, voiceMode: false) }
-                            .padding(.horizontal, 14)
-                            .padding(.vertical, 12)
-                            .frame(maxWidth: .infinity, minHeight: 48, alignment: .leading)
-                            .background(BrandTheme.homeCardSolid, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                                    .stroke(BrandTheme.homeCardBorder, lineWidth: 1)
-                            )
-                        Button("Send") { sendUser(input, voiceMode: false) }
-                            .font(.body.weight(.bold))
-                            .foregroundStyle(input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? BrandTheme.homeTertiaryText : BrandTheme.teal)
-                            .disabled(input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isLoading)
-                    }
-                    .padding(.horizontal, 8)
-                } else {
-                    Text(hintText)
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(BrandTheme.homeTertiaryText)
-                        .multilineTextAlignment(.center)
-                }
+                modernComposer
             }
         }
-        .padding(.horizontal)
-        .padding(.bottom, 18)
+        .padding(.horizontal, 14)
+        .padding(.top, 6)
+        .padding(.bottom, 10)
         .animation(.spring(response: 0.4, dampingFraction: 0.8), value: phase)
+        .animation(.spring(response: 0.32, dampingFraction: 0.82), value: voice.isRecording)
         .task(id: replyTimerID) {
             guard phase == .reply, dismissAfterReply else {
                 doneProgress = 0
-                // #region agent log
-                TrainerService.dinnerDebug(
-                    hypothesisId: "F",
-                    location: "CoachChatView.replyTimer",
-                    message: "timer skipped",
-                    data: [
-                        "phase": String(describing: phase),
-                        "dismissAfterReply": dismissAfterReply,
-                    ],
-                    runId: "post-fix"
-                )
-                // #endregion
                 return
             }
             doneProgress = 0
-            // #region agent log
-            TrainerService.dinnerDebug(
-                hypothesisId: "F",
-                location: "CoachChatView.replyTimer",
-                message: "timer started for food log",
-                data: ["dismissAfterReply": true],
-                runId: "post-fix"
-            )
-            // #endregion
             try? await Task.sleep(nanoseconds: 50_000_000)
             guard !Task.isCancelled else { return }
             withAnimation(.linear(duration: 2)) {
@@ -549,6 +555,109 @@ struct CoachChatView: View {
             guard !Task.isCancelled, phase == .reply, dismissAfterReply else { return }
             returnHome()
         }
+    }
+
+    private var modernComposer: some View {
+        HStack(alignment: .center, spacing: 10) {
+            if voice.isRecording {
+                listeningComposerBody
+            } else {
+                TextField("Message Larry…", text: $input, axis: .vertical)
+                    .focused($composerFocused)
+                    .font(.body.weight(.medium))
+                    .foregroundStyle(BrandTheme.homePrimaryText)
+                    .tint(BrandTheme.teal)
+                    .lineLimit(1...4)
+                    .submitLabel(.send)
+                    .onSubmit { sendUser(input, voiceMode: false) }
+                    .disabled(isLoading)
+            }
+
+            Button(action: micTapped) {
+                Image(systemName: voice.isRecording ? "stop.fill" : "mic.fill")
+                    .font(.body.weight(.bold))
+                    .foregroundStyle(.white)
+                    .frame(width: 40, height: 40)
+                    .background {
+                        Circle()
+                            .fill(voice.isRecording ? Color.red : BrandTheme.purple)
+                            .shadow(
+                                color: (voice.isRecording ? Color.red : BrandTheme.purple).opacity(0.45),
+                                radius: voice.isRecording ? 10 : 8,
+                                y: 2
+                            )
+                    }
+            }
+            .disabled(!voice.isReady || isLoading)
+            .accessibilityLabel(voice.isRecording ? "Stop and send" : "Talk to Larry")
+
+            if !voice.isRecording {
+                Button {
+                    sendUser(input, voiceMode: false)
+                } label: {
+                    Image(systemName: "arrow.up")
+                        .font(.body.weight(.bold))
+                        .foregroundStyle(canSendText ? .white : BrandTheme.homeTertiaryText)
+                        .frame(width: 40, height: 40)
+                        .background {
+                            Circle()
+                                .fill(canSendText ? BrandTheme.teal : BrandTheme.homeCardSolid)
+                        }
+                }
+                .disabled(!canSendText || isLoading)
+                .accessibilityLabel("Send")
+            }
+        }
+        .padding(.leading, 16)
+        .padding(.trailing, 8)
+        .padding(.vertical, 8)
+        .background {
+            RoundedRectangle(cornerRadius: 26, style: .continuous)
+                .fill(.ultraThinMaterial)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 26, style: .continuous)
+                        .fill(BrandTheme.homeActionBar)
+                )
+                .shadow(color: BrandTheme.purple.opacity(voice.isRecording ? 0.28 : 0.16), radius: 16, y: 6)
+                .shadow(color: .black.opacity(0.28), radius: 8, y: 3)
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: 26, style: .continuous)
+                .stroke(
+                    voice.isRecording ? BrandTheme.teal.opacity(0.45) : Color.white.opacity(0.08),
+                    lineWidth: voice.isRecording ? 1.2 : 0.5
+                )
+        }
+    }
+
+    private var listeningComposerBody: some View {
+        HStack(spacing: 12) {
+            ListeningWaveform(active: bounce)
+                .frame(height: 28)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(listeningLabel)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(BrandTheme.homePrimaryText)
+                    .lineLimit(1)
+                Text("Tap stop when you're done")
+                    .font(.caption2.weight(.medium))
+                    .foregroundStyle(BrandTheme.homeTertiaryText)
+            }
+            Spacer(minLength: 0)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(listeningLabel)
+    }
+
+    private var listeningLabel: String {
+        let live = voice.liveTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
+        if live.isEmpty { return "Listening…" }
+        return live
+    }
+
+    private var canSendText: Bool {
+        !input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     /// The tab shell ignores the keyboard, so lift the composer by the covered distance.
@@ -562,22 +671,6 @@ struct CoachChatView: View {
         }
     }
 
-    private var hintText: String {
-        if voice.isRecording { return "Tap when you're done talking" }
-        if phase == .thinking { return "Larry's cooking up a reply" }
-        return "Tap the mic. Larry talks back."
-    }
-
-    private var micButtonColor: Color {
-        if voice.isRecording { return .red }
-        if isLoading { return .gray }
-        return BrandTheme.purple
-    }
-
-    private var micIconName: String {
-        voice.isRecording ? "stop.fill" : "mic.fill"
-    }
-
     private func micTapped() {
         voiceError = nil
         if voice.isRecording {
@@ -589,6 +682,8 @@ struct CoachChatView: View {
             }
             sendUser(transcript, voiceMode: true)
         } else {
+            showKeyboard = false
+            composerFocused = false
             do {
                 try voice.startRecording()
                 withAnimation(.spring(response: 0.35, dampingFraction: 0.7)) {
@@ -642,20 +737,6 @@ struct CoachChatView: View {
             let goal = goalPayload ?? MacroGoalPayload(calories: 2000, proteinG: 150, carbsG: 180, fatG: 60)
             let left = remainingMacros ?? MacroTotals(calories: 800, proteinG: 50, carbsG: 70, fatG: 25)
             let pack = TrainerService.mealSuggestionPack(remaining: left, goal: goal, utterance: lastUser)
-            // #region agent log
-            TrainerService.dinnerDebug(
-                hypothesisId: "G",
-                location: "CoachChatView.reply",
-                message: "local dinner cards",
-                data: [
-                    "utterance": String(lastUser.prefix(180)),
-                    "plateCount": pack.plates.count,
-                    "evening": pack.evening,
-                    "caloriesLeft": Int(left.calories),
-                ],
-                runId: "post-fix"
-            )
-            // #endregion
             presentDinnerSuggestions(pack)
             persistChat()
             markCoachSeenToday()
@@ -695,8 +776,8 @@ struct CoachChatView: View {
     private func presentDinnerSuggestions(_ pack: TrainerService.MealSuggestionPack) {
         messages.append(ChatBubble(text: pack.spoken, isUser: false))
         dismissAfterReply = false
-        debugPathLabel = "path: dinner-cards · \(pack.plates.count) plates"
         replyEmotion = .neutral
+        platesAppeared = false
         withAnimation(.spring(response: 0.42, dampingFraction: 0.68)) {
             dinnerPlates = pack.plates
             dinnerHeader = pack.header
@@ -718,24 +799,21 @@ struct CoachChatView: View {
             return
         }
         messages.append(ChatBubble(text: spoken, isUser: false))
+        // #region agent log
+        AgentDebugLog.emit(
+            hypothesisId: "C",
+            location: "CoachChatView.presentLarry",
+            message: "spoken reply before any nutrition lookup",
+            data: [
+                "spoken": String(spoken.prefix(240)),
+                "isMealLog": isMealLog,
+            ]
+        )
+        // #endregion
         // Food logs get the short Done timer. Recommendations stay until you answer.
         dismissAfterReply = isMealLog
         dinnerPlates = []
         dinnerHeader = ""
-        debugPathLabel = isMealLog ? "path: food-log-timer" : "path: spoken-reply"
-        // #region agent log
-        TrainerService.dinnerDebug(
-            hypothesisId: "F",
-            location: "CoachChatView.presentLarry",
-            message: isMealLog ? "showing food log with timer" : "showing recommendation without timer",
-            data: [
-                "isMealLog": isMealLog,
-                "dismissAfterReply": isMealLog,
-                "reply": String(spoken.prefix(280)),
-            ],
-            runId: "post-fix"
-        )
-        // #endregion
         replyEmotion = LarryEmotion.fromReply(spoken)
         withAnimation(.spring(response: 0.42, dampingFraction: 0.68)) {
             larryReply = spoken
@@ -883,5 +961,30 @@ struct CoachChatView: View {
             settings.lastMorningRitualDate = Date()
             try? context.save()
         }
+    }
+}
+
+/// Lightweight listening bars — no audio metering dependency.
+private struct ListeningWaveform: View {
+    var active: Bool
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 0.08, paused: false)) { timeline in
+            let t = timeline.date.timeIntervalSinceReferenceDate
+            HStack(alignment: .center, spacing: 3) {
+                ForEach(0..<7, id: \.self) { index in
+                    Capsule(style: .continuous)
+                        .fill(BrandTheme.teal.opacity(0.85 - Double(abs(3 - index)) * 0.08))
+                        .frame(width: 3.5, height: barHeight(index: index, t: t))
+                }
+            }
+        }
+        .opacity(active ? 1 : 0.7)
+    }
+
+    private func barHeight(index: Int, t: TimeInterval) -> CGFloat {
+        let phase = t * 5.2 + Double(index) * 0.72
+        let wave = (sin(phase) + 1) * 0.5
+        return 8 + CGFloat(wave) * (index == 3 ? 18 : 12)
     }
 }

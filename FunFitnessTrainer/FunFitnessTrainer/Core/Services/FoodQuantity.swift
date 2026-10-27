@@ -121,6 +121,9 @@ enum FoodQuantity {
         if let flOz = parseExplicitFluidOunces(in: quantityText) {
             return FoodPortion(amount: flOz, unit: .fluidOunce, preparation: prep)
         }
+        if let pintOz = pintFluidOunces(in: quantityText) {
+            return FoodPortion(amount: pintOz, unit: .fluidOunce, preparation: prep)
+        }
         if let oz = parseOunces(in: quantityText) {
             if looksLikeBeverage(quantityText) {
                 return FoodPortion(amount: oz, unit: .fluidOunce, preparation: prep)
@@ -251,6 +254,16 @@ enum FoodQuantity {
 
     static func parseExplicitFluidOunces(in text: String) -> Double? {
         parseMeasurement(in: text, pattern: #"(\d+(?:\.\d+)?)\s*(?:fl\.?\s*oz|fluid\s*ounces?)\b"#)
+    }
+
+    /// US pint = 16 fl oz. "a pint", "two pints", and "half a pint".
+    static func pintFluidOunces(in text: String) -> Double? {
+        guard text.range(of: #"\bpints?\b"#, options: .regularExpression) != nil else { return nil }
+        if let count = parseMeasurement(in: text, pattern: #"(\d+(?:\.\d+)?)\s*pints?\b"#) {
+            return count * 16
+        }
+        let count = wordNumber(in: text) ?? 1
+        return count * 16
     }
 
     static func parseGrams(in text: String) -> Double? {

@@ -141,51 +141,21 @@ enum TrainerService {
         }
         let lastUser = messages.last(where: { $0.role == "user" })?.content ?? ""
         let lowered = lastUser.lowercased()
-        // #region agent log
-        dinnerDebug(
-            hypothesisId: "E",
-            location: "TrainerService.chatSafely",
-            message: "incoming utterance",
-            data: [
-                "mode": mode,
-                "hasBackend": AppConfig.hasBackend,
-                "utterance": String(lastUser.prefix(180)),
-                "hypothetical": looksLikeHypotheticalFood(lowered),
-                "mealSuggestion": looksLikeMealSuggestion(lowered),
-                "foodLog": looksLikeConfirmedFoodLog(lowered) || looksLikeCurrentFoodConsumption(lowered),
-                "hasGoal": goal != nil,
-                "hasRemaining": remaining != nil,
-            ]
-        )
-        // #endregion
         if looksLikeOpenMealAsk(lowered) {
             let resolvedGoal = goal ?? MacroGoalPayload(calories: 2000, proteinG: 150, carbsG: 180, fatG: 60)
             let left = remaining ?? goal.map { DaySummaryService.remaining(consumed: consumed, goal: $0) }
                 ?? MacroTotals(calories: 800, proteinG: 50, carbsG: 70, fatG: 25)
             let pack = mealSuggestionPack(remaining: left, goal: resolvedGoal, utterance: lowered)
-            let ideas = TrainerChatResponse(
+            return TrainerChatResponse(
                 reply: pack.spoken,
                 replies: nil,
                 suggested_goal: resolvedGoal,
                 suggested_meal: nil,
                 suggested_exercise: nil
             )
-            // #region agent log
-            dinnerDebug(
-                hypothesisId: "A",
-                location: "TrainerService.chatSafely",
-                message: "dinner ideas instead of food preview",
-                data: dinnerReplyData(ideas, path: "dinner-ideas", extra: [
-                    "plateCount": pack.plates.count,
-                    "evening": pack.evening,
-                ]),
-                runId: "post-fix"
-            )
-            // #endregion
-            return ideas
         }
         do {
-            let online = try await chat(
+            return try await chat(
                 mode: mode,
                 messages: messages,
                 trainerVoice: trainerVoice,
@@ -200,17 +170,8 @@ enum TrainerService {
                 stepGoal: stepGoal,
                 settings: settings
             )
-            // #region agent log
-            dinnerDebug(
-                hypothesisId: "B",
-                location: "TrainerService.chatSafely",
-                message: "online reply returned",
-                data: dinnerReplyData(online, path: "online")
-            )
-            // #endregion
-            return online
         } catch {
-            let offline = applyAutoMealLogIfNeeded(
+            return applyAutoMealLogIfNeeded(
                 offlineResponse(
                     mode: mode,
                     messages: messages,
@@ -224,18 +185,6 @@ enum TrainerService {
                 ),
                 messages: messages
             )
-            // #region agent log
-            dinnerDebug(
-                hypothesisId: "A",
-                location: "TrainerService.chatSafely",
-                message: "offline fallback reply",
-                data: dinnerReplyData(offline, path: "offline", extra: [
-                    "error": String(describing: error).prefix(180).description,
-                    "branch": dinnerOfflineBranch(lowered),
-                ])
-            )
-            // #endregion
-            return offline
         }
     }
 
@@ -266,7 +215,7 @@ enum TrainerService {
             return plan
         }
         guard AppConfig.hasBackend else {
-            let offline = offlineResponse(
+            return offlineResponse(
                 mode: mode,
                 messages: messages,
                 consumed: consumed,
@@ -277,17 +226,6 @@ enum TrainerService {
                 settings: settings,
                 exerciseCaloriesBurned: exerciseCaloriesBurned
             )
-            // #region agent log
-            dinnerDebug(
-                hypothesisId: "A",
-                location: "TrainerService.chat",
-                message: "no backend, offline reply",
-                data: dinnerReplyData(offline, path: "no-backend", extra: [
-                    "branch": dinnerOfflineBranch(messages.last(where: { $0.role == "user" })?.content.lowercased() ?? ""),
-                ])
-            )
-            // #endregion
-            return offline
         }
 
         let remainingPayload = remaining ?? (goal.map {
@@ -330,14 +268,6 @@ enum TrainerService {
 
         let data = try await SupabaseService.shared.invokeFunction(name: "trainer-chat", body: body, retries: 1)
         var response = try parseChatResponse(data)
-        // #region agent log
-        dinnerDebug(
-            hypothesisId: "C",
-            location: "TrainerService.chat",
-            message: "model reply before auto-log",
-            data: dinnerReplyData(response, path: "model-raw")
-        )
-        // #endregion
         if response.clear_todays_log == true {
             return TrainerChatResponse(
                 reply: response.reply,
@@ -349,14 +279,6 @@ enum TrainerService {
             )
         }
         response = applyAutoMealLogIfNeeded(response, messages: messages)
-        // #region agent log
-        dinnerDebug(
-            hypothesisId: "D",
-            location: "TrainerService.chat",
-            message: "reply after auto-log",
-            data: dinnerReplyData(response, path: "after-autolog")
-        )
-        // #endregion
         return response
     }
 
@@ -794,10 +716,11 @@ enum TrainerService {
 
         if let gptMeal = response.suggested_meal {
             let completed = FoodAnalysisService.completingMissingFoods(gptMeal, from: lastUser)
-            let meal = FoodAnalysisService.applyUserStatedMacros(
+            let portioned = FoodAnalysisService.applyingSpokenPortions(
                 FoodAnalysisService.reconcileMealPayload(completed),
-                from: lastUser
+                utterance: lastUser
             )
+            let meal = FoodAnalysisService.applyUserStatedMacros(portioned, from: lastUser)
             // #region agent log
             AgentDebugLog.emit(
                 hypothesisId: "E",
@@ -822,8 +745,8 @@ enum TrainerService {
             }
             if meal != gptMeal {
                 return TrainerChatResponse(
-                    reply: response.reply,
-                    replies: response.replies,
+                    reply: spokenNutritionReply(for: meal, logged: true),
+                    replies: nil,
                     suggested_goal: response.suggested_goal,
                     suggested_meal: meal,
                     suggested_exercise: response.suggested_exercise,
@@ -1007,8 +930,24 @@ enum TrainerService {
             let summary = entries.map { "\($0.name), about \(Int($0.calories)) calories" }.joined(separator: ". ")
             return "Logged \(entries.count) items\(sourceNote), baby. \(summary). Macros don't lie!"
         }
-        let one = entries.first ?? meal
-        return "Logged it\(sourceNote), baby. \(one.name), about \(Int(one.calories)) calories and \(Int(one.proteinG)) grams of protein. Macros don't lie!"
+        return spokenNutritionReply(for: meal, logged: true, sourceNote: sourceNote)
+    }
+
+    /// States the saved macros. Drinks include carbs so a pint of beer is not described like a latte.
+    private static func spokenNutritionReply(for meal: MealPayload, logged: Bool, sourceNote: String = "") -> String {
+        let one = meal.entriesForLogging().first ?? meal
+        let cal = Int(one.calories.rounded())
+        let protein = Int(one.proteinG.rounded())
+        let carbs = Int(one.carbsG.rounded())
+        let fat = Int(one.fatG.rounded())
+        let drink = FoodItemNaming.isBeverage(one.name) || FoodItemNaming.isBeverage(meal.name)
+        if logged {
+            if drink {
+                return "Logged\(sourceNote). \(one.name), about \(cal) calories, \(protein) grams of protein, and \(carbs) grams of carbs. Liquid calories. That's not a protein win."
+            }
+            return "Logged it\(sourceNote), baby. \(one.name), about \(cal) calories and \(protein) grams of protein. Macros don't lie!"
+        }
+        return "About \(cal) calories, \(protein) grams of protein, \(carbs) grams of carbs, and \(fat) grams of fat."
     }
 
     private static func offlineHypotheticalReplies(
@@ -1029,7 +968,7 @@ enum TrainerService {
         var message: String
         if FoodItemNaming.isBeverage(lower) {
             let roast = liquidCaloriesRoast(for: lower, eatingClean: eatingClean)
-            message = "About \(cal) calories, \(protein) grams of protein, \(fat) grams of fat. \(roast)"
+            message = "About \(cal) calories, \(protein) grams of protein, \(Int(entry.carbsG.rounded())) grams of carbs, and \(fat) grams of fat. \(roast)"
         } else if isJunkFood(lower) {
             let roast = junkFoodRoast(eatingClean: eatingClean, utterance: lower)
             message = "About \(cal) calories, \(protein) grams of protein, \(Int(entry.carbsG)) grams of carbs, \(fat) grams of fat. \(roast)"
@@ -1152,20 +1091,46 @@ enum TrainerService {
         let asking = text.contains("what") || text.contains("should") || text.contains("recommend")
             || text.contains("idea") || text.contains("?")
         let mealTime = text.contains("dinner") || text.contains("tonight") || text.contains("for the night")
+            || text.contains("breakfast") || text.contains("lunch") || text.contains("snack")
+            || text.contains("brunch") || text.contains("dessert") || text.contains("sweet tooth")
         if asking && mealTime { return true }
         let triggers = [
             "what should i eat", "what can i eat", "what do i eat", "what to eat",
             "what should i have", "what can i have", "what do i have",
             "what's for dinner", "whats for dinner", "what for dinner",
-            "dinner idea", "ideas for dinner", "meal idea", "meal suggestion",
+            "what's for breakfast", "whats for breakfast", "what's for lunch", "whats for lunch",
+            "what's for dessert", "whats for dessert", "what for dessert",
+            "dinner idea", "breakfast idea", "lunch idea", "snack idea", "dessert idea",
+            "ideas for dinner", "ideas for breakfast", "ideas for lunch", "ideas for dessert",
+            "meal idea", "meal suggestion",
             "eat tonight", "for dinner tonight", "dinner tonight", "for the night",
-            "what else", "still eat", "snack idea", "hungry",
+            "what else", "still eat", "hungry",
         ]
         return triggers.contains { text.contains($0) }
     }
 
     private static func looksLikeMealSuggestion(_ text: String) -> Bool {
         looksLikeOpenMealAsk(text)
+    }
+
+    enum MealSlot: Equatable {
+        case breakfast
+        case lunch
+        case dinner
+        case snack
+        case dessert
+        case general
+
+        var optionsLabel: String {
+            switch self {
+            case .breakfast: return "Breakfast options"
+            case .lunch: return "Lunch options"
+            case .dinner: return "Dinner options"
+            case .snack: return "Snack options"
+            case .dessert: return "Dessert options that won't bury your cut"
+            case .general: return "Meal options"
+            }
+        }
     }
 
     struct DinnerPlate: Identifiable, Equatable {
@@ -1190,7 +1155,29 @@ enum TrainerService {
         let header: String
         let spoken: String
         let plates: [DinnerPlate]
-        let evening: Bool
+        let slot: MealSlot
+
+        /// Kept for older call sites that still check evening.
+        var evening: Bool { slot == .dinner }
+    }
+
+    static func mealSlot(for utterance: String, hour: Int = Calendar.current.component(.hour, from: Date())) -> MealSlot {
+        let text = utterance.lowercased()
+        if text.contains("dessert") || text.contains("sweet tooth") || text.contains("something sweet") {
+            return .dessert
+        }
+        if text.contains("breakfast") || text.contains("brunch") { return .breakfast }
+        if text.contains("lunch") { return .lunch }
+        if text.contains("snack") { return .snack }
+        if text.contains("dinner") || text.contains("tonight") || text.contains("for the night") {
+            return .dinner
+        }
+        switch hour {
+        case 0..<11: return .breakfast
+        case 11..<15: return .lunch
+        case 15..<17: return .snack
+        default: return .dinner
+        }
     }
 
     static func mealSuggestionPack(
@@ -1198,36 +1185,100 @@ enum TrainerService {
         goal: MacroGoalPayload,
         utterance: String
     ) -> MealSuggestionPack {
-        let text = utterance.lowercased()
         let caloriesLeft = max(Int(remaining.calories.rounded()), 0)
         let proteinLeft = max(Int(remaining.proteinG.rounded()), 0)
-        let evening = text.contains("dinner") || text.contains("tonight") || text.contains("night")
-            || Calendar.current.component(.hour, from: Date()) >= 16
-        let catalog = evening ? eveningPlates : daytimePlates
-        var fits = catalog.filter { $0.calories <= caloriesLeft + 40 }
+        let slot = mealSlot(for: utterance)
+        let catalog = plates(for: slot)
+        let calorieSlack = slot == .dessert || slot == .snack ? 20 : 40
+        var fits = catalog.filter { $0.calories <= caloriesLeft + calorieSlack }
         if fits.count < 2 {
-            fits = catalog.filter { $0.calories <= max(caloriesLeft, 220) + 40 }.sorted { $0.calories < $1.calories }
+            fits = catalog.filter { $0.calories <= max(caloriesLeft, 120) + calorieSlack }.sorted { $0.calories < $1.calories }
         }
         let chosen = Array(fits.prefix(3))
-        let mealWord = evening ? "Dinner options" : "Meal options"
         if chosen.isEmpty {
-            let spoken = "You're out of calories for today. About \(caloriesLeft) calories and \(proteinLeft) grams of protein left. Keep it tiny if you still eat."
-            return MealSuggestionPack(header: spoken, spoken: spoken, plates: [], evening: evening)
+            let spoken = larryMealEmptyLine(slot: slot, caloriesLeft: caloriesLeft, proteinLeft: proteinLeft)
+            return MealSuggestionPack(header: spoken, spoken: spoken, plates: [], slot: slot)
         }
-        let ordinals = ["First", "Second", "Third"]
-        let spokenOptions = chosen.enumerated().map { index, plate in
-            "\(ordinals[index]). \(plate.name). About \(plate.calories) calories, \(plate.protein) grams of protein, \(plate.carbs) grams of carbs, and \(plate.fat) grams of fat."
-        }.joined(separator: " ")
-        let header = "You've got about \(caloriesLeft) calories and \(proteinLeft) grams of protein left. \(mealWord)."
-        let spoken = "\(header) \(spokenOptions) Tell me which one you're eating and I'll log it."
-        return MealSuggestionPack(header: header, spoken: spoken, plates: chosen, evening: evening)
+        let header = larryMealHeader(slot: slot, caloriesLeft: caloriesLeft, proteinLeft: proteinLeft)
+        let spoken = "\(header) Pick one and say you're having it. I'll log it. Macros don't lie."
+        return MealSuggestionPack(header: header, spoken: spoken, plates: chosen, slot: slot)
+    }
+
+    private static func larryMealHeader(slot: MealSlot, caloriesLeft: Int, proteinLeft: Int) -> String {
+        let bank: [String]
+        switch slot {
+        case .breakfast:
+            bank = [
+                "Breakfast. Not brunch chaos. You've got about \(caloriesLeft) calories and \(proteinLeft) grams of protein left. Eat like you mean it.",
+                "Morning fuel. About \(caloriesLeft) calories and \(proteinLeft) grams of protein left. Let's stop being a little bitch and start counting our macros!",
+            ]
+        case .lunch:
+            bank = [
+                "Lunch. Midday. No excuses. About \(caloriesLeft) calories and \(proteinLeft) grams of protein left. Hit protein or I get loud.",
+                "About \(caloriesLeft) calories and \(proteinLeft) grams of protein left for lunch. Real food. Your grandma didn't skip leg day.",
+            ]
+        case .dinner:
+            bank = [
+                "Dinner. Finish strong. About \(caloriesLeft) calories and \(proteinLeft) grams of protein left. Don't blow it now.",
+                "Night meal. About \(caloriesLeft) calories and \(proteinLeft) grams of protein left. Discipline tastes better than regret, baby.",
+            ]
+        case .snack:
+            bank = [
+                "Snack. Keep it tight. About \(caloriesLeft) calories and \(proteinLeft) grams of protein left. Don't turn this into a buffet.",
+                "About \(caloriesLeft) calories and \(proteinLeft) grams of protein left. A snack, not a second dinner. Macros don't lie.",
+            ]
+        case .dessert:
+            bank = [
+                "Dessert. Fine. But we're doing it my way. About \(caloriesLeft) calories and \(proteinLeft) grams of protein left. No Twinkies. Let's not be a little bitch and destroy our gains!",
+                "You want something sweet. I want you to keep your cut. About \(caloriesLeft) calories and \(proteinLeft) grams of protein left. These desserts still work for macros.",
+            ]
+        case .general:
+            bank = [
+                "About \(caloriesLeft) calories and \(proteinLeft) grams of protein left. Whole foods. No junk. Pick something that doesn't embarrass me.",
+            ]
+        }
+        return bank.randomElement() ?? bank[0]
+    }
+
+    private static func larryMealEmptyLine(slot: MealSlot, caloriesLeft: Int, proteinLeft: Int) -> String {
+        if slot == .dessert {
+            return "Dessert? With \(caloriesLeft) calories left? You're out of runway. Water, black coffee, or brush your teeth and call it a night. Macros don't lie."
+        }
+        return "You're cooked on calories. About \(caloriesLeft) calories and \(proteinLeft) grams of protein left. If you still eat, keep it tiny. Discipline tastes better than regret, baby."
     }
 
     private static func leanMealSuggestions(remaining: MacroTotals, goal: MacroGoalPayload, utterance: String) -> String {
         mealSuggestionPack(remaining: remaining, goal: goal, utterance: utterance).spoken
     }
 
-    private static let eveningPlates: [DinnerPlate] = [
+    private static func plates(for slot: MealSlot) -> [DinnerPlate] {
+        switch slot {
+        case .breakfast: return breakfastPlates
+        case .lunch: return lunchPlates
+        case .dinner: return dinnerPlates
+        case .snack: return snackPlates
+        case .dessert: return dessertPlates
+        case .general: return lunchPlates
+        }
+    }
+
+    private static let breakfastPlates: [DinnerPlate] = [
+        DinnerPlate(name: "Egg white scramble with spinach and turkey sausage", calories: 320, protein: 38, carbs: 8, fat: 12),
+        DinnerPlate(name: "Greek yogurt, berries, and a scoop of whey", calories: 280, protein: 40, carbs: 22, fat: 4),
+        DinnerPlate(name: "Overnight oats with egg whites and banana", calories: 360, protein: 28, carbs: 48, fat: 6),
+        DinnerPlate(name: "Two eggs, egg whites, and Dave's toast", calories: 340, protein: 30, carbs: 24, fat: 14),
+        DinnerPlate(name: "Nonfat cottage cheese with pineapple", calories: 200, protein: 26, carbs: 18, fat: 2),
+    ]
+
+    private static let lunchPlates: [DinnerPlate] = [
+        DinnerPlate(name: "Grilled chicken and a big salad", calories: 420, protein: 48, carbs: 12, fat: 14),
+        DinnerPlate(name: "Turkey wrap with veggies, no mayo", calories: 380, protein: 36, carbs: 34, fat: 10),
+        DinnerPlate(name: "Tuna on rice cakes with cucumber", calories: 300, protein: 32, carbs: 28, fat: 6),
+        DinnerPlate(name: "Lean ground turkey, rice, and broccoli", calories: 450, protein: 42, carbs: 40, fat: 12),
+        DinnerPlate(name: "Chicken breast and sweet potato", calories: 400, protein: 46, carbs: 36, fat: 6),
+    ]
+
+    private static let dinnerPlates: [DinnerPlate] = [
         DinnerPlate(name: "Grilled chicken, broccoli, and rice", calories: 540, protein: 54, carbs: 48, fat: 8),
         DinnerPlate(name: "Salmon, a salad, and a small potato", calories: 610, protein: 40, carbs: 32, fat: 28),
         DinnerPlate(name: "A turkey burger with no bun and roasted vegetables", calories: 400, protein: 46, carbs: 14, fat: 16),
@@ -1235,11 +1286,20 @@ enum TrainerService {
         DinnerPlate(name: "Nonfat cottage cheese with cucumber and berries", calories: 220, protein: 28, carbs: 16, fat: 3),
     ]
 
-    private static let daytimePlates: [DinnerPlate] = [
-        DinnerPlate(name: "Grilled chicken and a big salad", calories: 420, protein: 48, carbs: 12, fat: 14),
-        DinnerPlate(name: "Greek yogurt, berries, and a few almonds", calories: 320, protein: 32, carbs: 28, fat: 10),
-        DinnerPlate(name: "Egg whites, two whole eggs, and spinach", calories: 280, protein: 28, carbs: 4, fat: 16),
-        DinnerPlate(name: "Nonfat cottage cheese with cucumber and berries", calories: 220, protein: 28, carbs: 16, fat: 3),
+    private static let snackPlates: [DinnerPlate] = [
+        DinnerPlate(name: "Greek yogurt with berries", calories: 180, protein: 20, carbs: 18, fat: 2),
+        DinnerPlate(name: "Nonfat cottage cheese with cucumber", calories: 140, protein: 22, carbs: 8, fat: 2),
+        DinnerPlate(name: "A Fairlife protein shake", calories: 150, protein: 30, carbs: 4, fat: 2),
+        DinnerPlate(name: "Turkey slices and an apple", calories: 200, protein: 24, carbs: 22, fat: 3),
+        DinnerPlate(name: "Egg whites and a rice cake", calories: 120, protein: 16, carbs: 12, fat: 0),
+    ]
+
+    private static let dessertPlates: [DinnerPlate] = [
+        DinnerPlate(name: "Greek yogurt with cocoa powder and berries", calories: 190, protein: 20, carbs: 22, fat: 2),
+        DinnerPlate(name: "Protein pudding with a few strawberries", calories: 170, protein: 25, carbs: 12, fat: 3),
+        DinnerPlate(name: "Frozen banana blended with whey and ice", calories: 210, protein: 24, carbs: 26, fat: 2),
+        DinnerPlate(name: "Nonfat cottage cheese whipped with cinnamon and berries", calories: 160, protein: 24, carbs: 14, fat: 2),
+        DinnerPlate(name: "Sugar-free jello with a scoop of casein", calories: 130, protein: 24, carbs: 6, fat: 1),
     ]
 
     private static func offlineReply(
@@ -1292,86 +1352,4 @@ enum TrainerService {
         }
         return "Fine. You're logging. Don't get comfortable. Macros don't lie."
     }
-
-    // #region agent log
-    private static func dinnerOfflineBranch(_ text: String) -> String {
-        if looksLikeClearTodaysLog(text) { return "clear" }
-        if looksLikeExerciseLog(text) { return "exercise" }
-        if looksLikeFoodConfirmation(text) { return "confirm" }
-        if looksLikeConfirmedFoodLog(text) || looksLikeCurrentFoodConsumption(text) { return "foodLog" }
-        if looksLikeHypotheticalFood(text) { return "hypothetical" }
-        if looksLikeFoodMacroQuery(text) { return "macroQuery" }
-        if looksLikeMealSuggestion(text) { return "mealSuggestion" }
-        if looksLikeFitnessQuestion(text) { return "fitness" }
-        return "generic"
-    }
-
-    private static func dinnerReplyData(
-        _ response: TrainerChatResponse,
-        path: String,
-        extra: [String: Any] = [:]
-    ) -> [String: Any] {
-        let reply = response.spokenReply
-        let lower = reply.lowercased()
-        var data: [String: Any] = [
-            "path": path,
-            "reply": String(reply.prefix(280)),
-            "hasMeal": response.suggested_meal != nil,
-            "mealName": response.suggested_meal?.name ?? "",
-            "saysLogIt": lower.contains("say the word") || lower.contains("if you eat it") || lower.contains("i'll log"),
-            "mentionsDinnerPlate": lower.contains("chicken") || lower.contains("fish") || lower.contains("dinner"),
-        ]
-        for (key, value) in extra { data[key] = value }
-        return data
-    }
-
-    static func dinnerDebug(hypothesisId: String, location: String, message: String, data: [String: Any], runId: String = "pre-fix") {
-        let payload: [String: Any] = [
-            "sessionId": "9409e9",
-            "runId": runId,
-            "hypothesisId": hypothesisId,
-            "location": location,
-            "message": message,
-            "data": data,
-            "timestamp": Int(Date().timeIntervalSince1970 * 1000),
-        ]
-        guard let json = try? JSONSerialization.data(withJSONObject: payload) else { return }
-        let paths = [
-            "/Users/lukeeidsvold/Social Media Guru/exports/Fun Fitness Trainer/.cursor/debug-9409e9.log",
-            FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first?
-                .appendingPathComponent("debug-9409e9.log").path,
-        ].compactMap { $0 }
-        for logPath in paths {
-            if !FileManager.default.fileExists(atPath: logPath) {
-                FileManager.default.createFile(atPath: logPath, contents: nil)
-            }
-            if let handle = FileHandle(forWritingAtPath: logPath) {
-                defer { try? handle.close() }
-                handle.seekToEndOfFile()
-                if var line = String(data: json, encoding: .utf8) {
-                    line += "\n"
-                    if let bytes = line.data(using: .utf8) { handle.write(bytes) }
-                }
-            }
-        }
-        UserDefaults.standard.set(message, forKey: "debugLarryDinnerMessage")
-        UserDefaults.standard.set(data.description, forKey: "debugLarryDinnerData")
-        #if DEBUG
-        print("[dinnerDebug] \(hypothesisId) \(location): \(message) \(data)")
-        #endif
-        let endpoints = [
-            "http://127.0.0.1:7417/ingest/1f1eb15b-5e96-4046-891c-3aaf57988060",
-            "http://192.168.1.39:7417/ingest/1f1eb15b-5e96-4046-891c-3aaf57988060",
-        ]
-        for endpoint in endpoints {
-            guard let url = URL(string: endpoint) else { continue }
-            var request = URLRequest(url: url)
-            request.httpMethod = "POST"
-            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            request.setValue("9409e9", forHTTPHeaderField: "X-Debug-Session-Id")
-            request.httpBody = json
-            URLSession.shared.dataTask(with: request).resume()
-        }
-    }
-    // #endregion
 }

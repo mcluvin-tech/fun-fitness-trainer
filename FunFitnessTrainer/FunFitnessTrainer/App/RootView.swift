@@ -285,10 +285,10 @@ struct FloatingHomeTabBar: View {
                 )
                 .overlay(
                     Capsule(style: .continuous)
-                        .stroke(BrandTheme.homeCardBorder, lineWidth: 1)
+                        .stroke(Color.white.opacity(0.08), lineWidth: 0.5)
                 )
-                .shadow(color: .black.opacity(0.4), radius: 20, y: 10)
-                .shadow(color: BrandTheme.purple.opacity(0.22), radius: 16, y: 4)
+                .shadow(color: .black.opacity(0.35), radius: 16, y: 8)
+                .shadow(color: BrandTheme.purple.opacity(0.12), radius: 12, y: 3)
         }
         .overlay {
             larryTalkButton
@@ -307,31 +307,31 @@ struct FloatingHomeTabBar: View {
                 Circle()
                     .fill(
                         LinearGradient(
-                            colors: [BrandTheme.purple, BrandTheme.magenta.opacity(0.9)],
+                            colors: selected
+                                ? [BrandTheme.purple, BrandTheme.magenta.opacity(0.88)]
+                                : [BrandTheme.purple.opacity(0.92), BrandTheme.purple.opacity(0.75)],
                             startPoint: .topLeading,
                             endPoint: .bottomTrailing
                         )
                     )
                     .frame(width: larryButtonSize, height: larryButtonSize)
-                    .shadow(color: BrandTheme.purple.opacity(selected ? 0.7 : 0.45), radius: 12, y: 4)
+                    .shadow(
+                        color: BrandTheme.purple.opacity(selected ? 0.42 : 0.22),
+                        radius: selected ? 10 : 6,
+                        y: 3
+                    )
 
-                LarryAvatarView(portrait: .home, size: larryButtonSize - 4)
+                LarryAvatarView(portrait: .home, size: larryButtonSize - 6)
                     .overlay(
                         Circle()
                             .stroke(
-                                LinearGradient(
-                                    colors: selected
-                                        ? [BrandTheme.teal, BrandTheme.magenta]
-                                        : [.white.opacity(0.55), BrandTheme.teal.opacity(0.85)],
-                                    startPoint: .topLeading,
-                                    endPoint: .bottomTrailing
-                                ),
-                                lineWidth: 2.5
+                                selected ? BrandTheme.teal.opacity(0.95) : Color.white.opacity(0.35),
+                                lineWidth: selected ? 2 : 1.25
                             )
                     )
             }
             .frame(width: larryButtonSize, height: larryButtonSize)
-            .scaleEffect(selected ? 1.04 : 1)
+            .scaleEffect(selected ? 1.03 : 0.98)
         }
         .buttonStyle(.plain)
         .accessibilityLabel("Talk to Larry")
@@ -351,9 +351,9 @@ struct FloatingHomeTabBar: View {
                     .font(.body.weight(selected ? .semibold : .regular))
                     .symbolVariant(selected ? .fill : .none)
                 Text(label)
-                    .font(.caption2.weight(selected ? .bold : .medium))
+                    .font(.caption2.weight(selected ? .semibold : .regular))
             }
-            .foregroundStyle(selected ? BrandTheme.homePrimaryText : BrandTheme.homeTertiaryText)
+            .foregroundStyle(selected ? BrandTheme.homePrimaryText : BrandTheme.homeTertiaryText.opacity(0.72))
             .frame(maxWidth: .infinity)
             .padding(.vertical, 4)
         }

@@ -3,7 +3,6 @@ import SwiftData
 
 struct SettingsView: View {
     @EnvironmentObject private var appState: AppState
-    @Environment(\.modelContext) private var context
     @Query private var settingsList: [UserSettings]
     @StateObject private var supabase = SupabaseService.shared
     @StateObject private var appleSignIn = SignInWithAppleHelper()
@@ -35,9 +34,6 @@ struct SettingsView: View {
                     Text(dietFooter)
                 }
                 Section {
-                    NavigationLink("Larry's voice") {
-                        TrainerVoiceView()
-                    }
                     Toggle("Remind me to log meals", isOn: $mealReminders)
                         .onChange(of: mealReminders) { _, value in
                             HealthActivityPreferences.mealLogRemindersEnabled = value
@@ -209,9 +205,6 @@ struct SettingsView: View {
             } message: {
                 Text("This removes your sign-in session. Cloud data deletion may require support contact.")
             }
-            .onChange(of: supabase.isSignedIn) { _, signedIn in
-                if signedIn { Task { await syncVoiceFromCloud() } }
-            }
     }
 
     private var dietStatusLabel: String {
@@ -227,53 +220,6 @@ struct SettingsView: View {
             return "\(settings.dietStyle.summary) Tap calories on Today to see why the target is set, and to pull it a little lower."
         }
         return "Choose paleo, keto, carnivore, or balanced. Tap calories on Today to see the math and pull the goal a little lower."
-    }
-
-    private func syncVoiceFromCloud() async {
-        guard let settings = settingsList.first else { return }
-        if let voice = try? await supabase.fetchTrainerVoice(), !voice.isEmpty {
-            settings.trainerVoice = voice
-            try? context.save()
-        }
-    }
-}
-
-struct TrainerVoiceView: View {
-    @Query private var settingsList: [UserSettings]
-    @Environment(\.modelContext) private var context
-    @State private var voice = ""
-    @State private var saved = false
-
-    var body: some View {
-        VStack(alignment: .leading) {
-            TextEditor(text: $voice)
-                .padding(4)
-                .overlay(RoundedRectangle(cornerRadius: 8).stroke(.quaternary))
-            if saved {
-                Text("Saved").font(.caption).foregroundStyle(.green)
-            }
-            Spacer()
-        }
-        .padding()
-        .navigationTitle("Larry's voice")
-        .onAppear {
-            let stored = settingsList.first?.trainerVoice ?? ""
-            voice = stored.isEmpty ? LarryMcQuade.defaultVoice : stored
-        }
-        .toolbar {
-            ToolbarItem(placement: .confirmationAction) {
-                Button("Save") {
-                    if let s = settingsList.first {
-                        s.trainerVoice = voice
-                    }
-                    try? context.save()
-                    saved = true
-                    Task {
-                        try? await SupabaseService.shared.syncTrainerVoice(voice)
-                    }
-                }
-            }
-        }
     }
 }
 

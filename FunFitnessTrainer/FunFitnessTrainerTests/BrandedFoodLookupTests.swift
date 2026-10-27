@@ -115,8 +115,8 @@ final class BrandedFoodLookupTests: XCTestCase {
     func testCloseProductsAskInsteadOfGuessing() async {
         catalog.responses = [
             "mystery munch": [
-                hit("Mystery Munch Original", brand: "Mystery", calories: 100, protein: 4, carbs: 12, fat: 3, serving: "1 pack"),
-                hit("Mystery Munch Spicy", brand: "Mystery", calories: 400, protein: 8, carbs: 40, fat: 22, serving: "1 pack"),
+                Self.hit("Mystery Munch Original", brand: "Mystery", calories: 100, protein: 4, carbs: 12, fat: 3, serving: "1 pack"),
+                Self.hit("Mystery Munch Spicy", brand: "Mystery", calories: 400, protein: 8, carbs: 40, fat: 22, serving: "1 pack"),
             ],
         ]
         let outcome = await FoodAnalysisService.resolveFoodLog(from: "mystery munch")

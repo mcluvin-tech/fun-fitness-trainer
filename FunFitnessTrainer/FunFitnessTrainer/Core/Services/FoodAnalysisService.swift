@@ -254,7 +254,7 @@ enum FoodAnalysisService {
     }
 
     /// Voice/text logging. Each food in the phrase is resolved on its own:
-    /// a covering staple, then a branded catalog match, then generic USDA / Open Food Facts.
+    /// a covering staple, then a branded catalog match when a brand was named, then generic USDA.
     static func resolveMealForLogging(from description: String) async -> MealPayload {
         await resolveFoodLog(from: description).meal
     }
@@ -316,6 +316,8 @@ enum FoodAnalysisService {
         }
 
         if !BrandedFoodResolver.shouldSearchCatalog(phrase) {
+            // No brand was named. Foundation / SR Legacy is the food itself.
+            // A packaged Open Food Facts hit here is some company's jar, not "raw honey".
             if let food = await USDAFoodDataService.lookupGeneric(query: phrase) {
                 let fromUSDA = mealPayload(from: food, userDescription: segment)
                 // #region agent log
@@ -334,14 +336,7 @@ enum FoodAnalysisService {
                 return SegmentLookup(meal: fromUSDA, alternatives: [], needsConfirmation: false)
             }
 
-            let offline = estimateOffline(from: phrase)
-            if let product = try? await OpenFoodFactsService.searchBestMatch(query: phrase) {
-                let fromOFF = mealPayload(from: product, userDescription: segment)
-                if !shouldPreferOffline(over: fromOFF, offline: offline, userDescription: segment) {
-                    return SegmentLookup(meal: fromOFF, alternatives: [], needsConfirmation: false)
-                }
-            }
-            return SegmentLookup(meal: offline, alternatives: [], needsConfirmation: false)
+            return SegmentLookup(meal: estimateOffline(from: phrase), alternatives: [], needsConfirmation: false)
         }
 
         return SegmentLookup(meal: estimateOffline(from: phrase), alternatives: [], needsConfirmation: false)
@@ -549,21 +544,6 @@ enum FoodAnalysisService {
             || serving.contains("1 ")
             || serving.hasPrefix("1")
         return looksPerUnit ? portion.amount : 1
-    }
-
-    /// When OFF returns ~1 serving but the user said "3 eggs" / "2 slices", keep the scaled offline staple.
-    private static func shouldPreferOffline(
-        over off: MealPayload,
-        offline: MealPayload,
-        userDescription: String
-    ) -> Bool {
-        guard hasKnownNutrition(for: userDescription) else { return false }
-        let qty = Double(FoodItemNaming.parseQuantity(in: userDescription.lowercased()))
-        guard qty > 1 else { return false }
-        let offlineEntry = offline.entriesForLogging().first ?? offline
-        guard offlineEntry.calories > 0 else { return false }
-        // OFF under-counted vs offline (common when multiplier stayed at 1).
-        return off.calories < offlineEntry.calories * 0.7
     }
 
     /// Fix GPT / estimate rows so quantity in the name scales macros.

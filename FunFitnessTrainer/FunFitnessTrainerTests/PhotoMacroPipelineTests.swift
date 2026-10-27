@@ -565,8 +565,25 @@ final class PhotoMacroPipelineTests: XCTestCase {
 
     func testRawHoneyFallsThroughGenericEstimateUntilLookup() async {
         let offline = FoodAnalysisService.estimateOffline(from: "I had raw honey")
-        let resolved = await FoodAnalysisService.resolveMealForLogging(from: "I had raw honey")
         let entry = offline.entriesForLogging().first
+        XCTAssertEqual(entry?.calories ?? 0, 242, "Offline placeholder is Atwater of 8/30/10 until USDA lookup")
+        XCTAssertEqual(entry?.proteinG ?? 0, 8)
+
+        // 1 tbsp of USDA honey is 21 g. 304 kcal and 0.3 g protein per 100 g.
+        let honey = USDAGenericFood(
+            name: "Honey",
+            dataType: "SR Legacy",
+            per100g: MacroTotals(calories: 304, proteinG: 0.3, carbsG: 82.4, fatG: 0),
+            grams: 21,
+            quantity: 1,
+            unit: "tbsp",
+            portionLabel: "1 tbsp",
+            assumedPortion: true
+        )
+        USDAFoodDataService.genericLookupForTests = { @Sendable _ in honey }
+        defer { USDAFoodDataService.genericLookupForTests = nil }
+
+        let resolved = await FoodAnalysisService.resolveMealForLogging(from: "I had raw honey")
         // #region agent log
         AgentDebugLog.emit(
             hypothesisId: "A",
@@ -575,25 +592,24 @@ final class PhotoMacroPipelineTests: XCTestCase {
             data: [
                 "offlineCalories": entry?.calories ?? -1,
                 "offlineProtein": entry?.proteinG ?? -1,
-                "offlineCarbs": entry?.carbsG ?? -1,
-                "offlineFat": entry?.fatG ?? -1,
-                "offlineSource": entry?.source.rawValue ?? "",
                 "resolvedCalories": resolved.calories,
                 "resolvedProtein": resolved.proteinG,
-                "resolvedCarbs": resolved.carbsG,
-                "resolvedFat": resolved.fatG,
                 "resolvedSource": resolved.source.rawValue,
                 "resolvedName": resolved.name,
-                "labelBacked": resolved.isLabelBacked,
             ]
         )
         // #endregion
-        XCTAssertEqual(entry?.calories ?? 0, 242, "Offline placeholder is Atwater of 8/30/10 until USDA lookup")
-        XCTAssertEqual(entry?.proteinG ?? 0, 8)
-        XCTAssertEqual(resolved.source, .usda, "Raw honey should come from USDA, not the 200/10 placeholder")
+        XCTAssertEqual(resolved.source, .usda, "Raw honey should come from USDA, not a packaged brand")
         XCTAssertLessThan(resolved.proteinG, 1, "Honey is not a protein food")
         XCTAssertGreaterThan(resolved.calories, 50)
         XCTAssertLessThan(resolved.calories, 80, "1 tbsp honey is about 64 kcal, not 200")
+        XCTAssertFalse(resolved.name.lowercased().contains("oz"))
+
+        USDAFoodDataService.genericLookupForTests = { @Sendable _ in nil }
+        let missed = await FoodAnalysisService.resolveMealForLogging(from: "I had raw honey")
+        XCTAssertEqual(missed.source, .genericEstimate)
+        XCTAssertEqual(missed.calories, 242, accuracy: 0.1)
+        XCTAssertNotEqual(missed.source, .manufacturer, "No brand was named, so a jar from the packaged catalog must not win")
         await AgentDebugLog.flush()
     }
 

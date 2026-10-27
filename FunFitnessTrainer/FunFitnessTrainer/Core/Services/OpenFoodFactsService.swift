@@ -555,7 +555,7 @@ struct USDABrandedServing: Equatable {
     var servingGrams: Double?
 }
 
-struct USDAGenericFood {
+struct USDAGenericFood: Sendable {
     var name: String
     var dataType: String
     /// Nutrients for 100 grams.
@@ -609,9 +609,15 @@ enum USDAFoodDataService {
         return nil
     }
 
+    /// Tests install this so a generic-food lookup does not call the USDA API.
+    static var genericLookupForTests: (@Sendable (String) async -> USDAGenericFood?)?
+
     /// Foundation / SR Legacy name search for foods that are not local staples (honey, berries, …).
     /// "raw honey" must not match every SR Legacy row that merely ends in ", raw".
     static func lookupGeneric(query: String) async -> USDAGenericFood? {
+        if let genericLookupForTests {
+            return await genericLookupForTests(query)
+        }
         let terms = genericSearchTerms(from: query)
         guard !terms.isEmpty else { return nil }
         let tokens = wordTokens(terms)

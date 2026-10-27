@@ -5,15 +5,15 @@ import XCTest
 final class BrandedFoodLookupTests: XCTestCase {
     private var catalog = ScriptedBrandCatalog()
 
-    override func setUp() {
-        super.setUp()
+    override func setUp() async throws {
+        try await super.setUp()
         catalog = ScriptedBrandCatalog(responses: Self.fixtures)
-        BrandedFoodResolver.useCatalogForTests(catalog)
+        await BrandedFoodResolver.useCatalogForTests(catalog)
     }
 
-    override func tearDown() {
-        BrandedFoodResolver.restoreLiveCatalogForTests()
-        super.tearDown()
+    override func tearDown() async throws {
+        await BrandedFoodResolver.restoreLiveCatalogForTests()
+        try await super.tearDown()
     }
 
     func testCatalinaCrunchUsesTheCinnamonToastServing() async {
@@ -201,7 +201,7 @@ final class BrandedFoodLookupTests: XCTestCase {
         ]
         for phrase in phrases {
             catalog.queries.removeAll()
-            BrandedFoodResolver.useCatalogForTests(catalog)
+            await BrandedFoodResolver.useCatalogForTests(catalog)
             let outcome = await TrainerService.resolveLoggedFood(from: phrase)
             XCTAssertEqual(outcome.meal.calories, 110, accuracy: 1, phrase)
             XCTAssertEqual(outcome.meal.proteinG, 11, accuracy: 0.5, phrase)
@@ -244,7 +244,7 @@ final class BrandedFoodLookupTests: XCTestCase {
             ProcessInfo.processInfo.environment["RUN_LIVE_FOOD_TESTS"] == "1",
             "Set RUN_LIVE_FOOD_TESTS=1 to resolve Catlina crunch against the USDA API"
         )
-        BrandedFoodResolver.restoreLiveCatalogForTests()
+        await BrandedFoodResolver.restoreLiveCatalogForTests()
         let meal = await FoodAnalysisService.resolveFoodLog(from: "Catlina crunch").meal
         XCTAssertEqual(meal.calories, 110, accuracy: 5)
         XCTAssertEqual(meal.proteinG, 11, accuracy: 1.5)
@@ -330,7 +330,7 @@ final class BrandedFoodLookupTests: XCTestCase {
     }
 }
 
-private final class ScriptedBrandCatalog: BrandedFoodCatalog {
+private final class ScriptedBrandCatalog: BrandedFoodCatalog, @unchecked Sendable {
     var queries: [String] = []
     var responses: [String: [BrandedFoodHit]]
 

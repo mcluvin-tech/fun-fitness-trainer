@@ -12,7 +12,7 @@ struct BrandedFoodHit: Equatable, Sendable {
     var score: Double = 0
 }
 
-struct BrandedFoodResolution: Equatable {
+struct BrandedFoodResolution: Equatable, Sendable {
     var best: BrandedFoodHit
     var alternatives: [BrandedFoodHit]
     /// True when the best hit is too weak, or a rival is close enough that guessing would be wrong.
@@ -33,14 +33,14 @@ struct FoodLookupOutcome: Equatable {
 }
 
 /// Brand/product search. Tests install a stand-in so lookups never touch the network.
-protocol BrandedFoodCatalog {
+protocol BrandedFoodCatalog: Sendable {
     func searchBranded(query: String) async -> [BrandedFoodHit]
 }
 
 /// USDA Branded foods and Open Food Facts, side by side.
 /// USDA uses the optional `USDA_API_KEY` already read by barcode lookup, or the public demo key.
 /// Open Food Facts needs no key. A failure on either side returns nothing from that side.
-struct LiveBrandedFoodCatalog: BrandedFoodCatalog {
+struct LiveBrandedFoodCatalog: BrandedFoodCatalog, Sendable {
     func searchBranded(query: String) async -> [BrandedFoodHit] {
         await Self.combiningIndependentResults(
             usda: { @Sendable in
@@ -129,16 +129,46 @@ struct LiveBrandedFoodCatalog: BrandedFoodCatalog {
     }
 }
 
+/// Cache and the installed catalog. An actor so resolve can await it.
+/// NSLock.lock() is unavailable from an asynchronous function under Swift 6.
+private actor BrandedCatalogStore {
+    private var catalog: BrandedFoodCatalog = LiveBrandedFoodCatalog()
+    private var cache: [String: BrandedFoodResolution] = [:]
+    private var cacheOrder: [String] = []
+
+    func cached(_ search: String) -> BrandedFoodResolution? {
+        cache[search]
+    }
+
+    func currentCatalog() -> BrandedFoodCatalog {
+        catalog
+    }
+
+    func remember(_ search: String, _ ranked: BrandedFoodResolution) {
+        if cache[search] == nil {
+            cacheOrder.append(search)
+        }
+        cache[search] = ranked
+        while cacheOrder.count > 60 {
+            let evict = cacheOrder.removeFirst()
+            cache.removeValue(forKey: evict)
+        }
+    }
+
+    func replaceCatalog(_ replacement: BrandedFoodCatalog) {
+        catalog = replacement
+        cache.removeAll()
+        cacheOrder.removeAll()
+    }
+}
+
 /// Turns whatever name Luke used into a real per-serving label.
 ///
 /// Order: spelling fix, then a local staple when that staple actually covers the phrase,
-/// then a ranked search of branded catalogs, then the existing generic USDA / Open Food Facts path.
+/// then a ranked search of branded catalogs, then generic USDA for an unnamed food.
 /// Repeats of the same corrected name reuse the last ranked result.
 enum BrandedFoodResolver {
-    private static let lock = NSLock()
-    private static var catalog: BrandedFoodCatalog = LiveBrandedFoodCatalog()
-    private static var cache: [String: BrandedFoodResolution] = [:]
-    private static var cacheOrder: [String] = []
+    private static let store = BrandedCatalogStore()
 
     /// Words that are a product form. A chicken staple must not swallow "protein shake".
     private static let productForms: Set<String> = [
@@ -168,16 +198,12 @@ enum BrandedFoodResolver {
         "catalina", "crunch", "quest", "fairlife", "chipotle", "killer", "daves",
     ]
 
-    static func useCatalogForTests(_ replacement: BrandedFoodCatalog) {
-        lock.lock()
-        catalog = replacement
-        cache.removeAll()
-        cacheOrder.removeAll()
-        lock.unlock()
+    static func useCatalogForTests(_ replacement: BrandedFoodCatalog) async {
+        await store.replaceCatalog(replacement)
     }
 
-    static func restoreLiveCatalogForTests() {
-        useCatalogForTests(LiveBrandedFoodCatalog())
+    static func restoreLiveCatalogForTests() async {
+        await useCatalogForTests(LiveBrandedFoodCatalog())
     }
 
     /// "Catalina, Crunch" is one product. "eggs, toast" stays two foods.
@@ -252,27 +278,13 @@ enum BrandedFoodResolver {
         let search = searchText(for: query)
         guard !search.isEmpty else { return nil }
 
-        lock.lock()
-        if let cached = cache[search] {
-            lock.unlock()
+        if let cached = await store.cached(search) {
             return cached
         }
-        let active = catalog
-        lock.unlock()
-
+        let active = await store.currentCatalog()
         let hits = await active.searchBranded(query: search)
         guard let ranked = rank(searchText: search, hits: hits) else { return nil }
-
-        lock.lock()
-        if cache[search] == nil {
-            cacheOrder.append(search)
-        }
-        cache[search] = ranked
-        while cacheOrder.count > 60 {
-            let evict = cacheOrder.removeFirst()
-            cache.removeValue(forKey: evict)
-        }
-        lock.unlock()
+        await store.remember(search, ranked)
         return ranked
     }
 

@@ -733,7 +733,7 @@ enum FoodAnalysisService {
         return MacroTotals(calories: calories, proteinG: proteinG, carbsG: carbsG, fatG: fatG)
     }
 
-    /// "16 oz milk" used to multiply the per-100 g row by 16. Rewrite only obvious multiples.
+    /// "8 oz milk" and "8 fl oz milk" used to multiply the per-100 g row by 8. Rewrite only obvious multiples.
     private static func repairedExplodedPortion(
         name: String,
         storedCalories: Double,
@@ -743,7 +743,10 @@ enum FoodAnalysisService {
     ) -> MacroTotals? {
         guard storedCalories >= 400 else { return nil }
         let lower = name.lowercased()
+        // "8 fl oz" is not a weight-ounce match: the number is not sitting directly on "oz".
         let hasMeasure = FoodQuantity.parseOunces(in: lower) != nil
+            || FoodQuantity.parseExplicitFluidOunces(in: lower) != nil
+            || FoodQuantity.pintFluidOunces(in: lower) != nil
             || FoodQuantity.parseGrams(in: lower) != nil
             || FoodQuantity.parseMilliliters(in: lower) != nil
             || lower.contains("cup")

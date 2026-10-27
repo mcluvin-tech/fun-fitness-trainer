@@ -652,6 +652,56 @@ enum StapleNutritionDatabase {
         notes: "Fairlife ultra-filtered chocolate milk, ~1 cup"
     )
 
+    /// 11.5 fl oz Fairlife Nutrition Plan / Core Power Elite-style shake.
+    /// Bare "Fairlife" stays the chocolate milk above — only these longer names hit the shake.
+    static let fairlifeProteinShake = Entry(
+        key: "fairlife_protein_shake",
+        aliases: [
+            "fairlife protein shake",
+            "fairlife shake",
+            "fairlife nutrition plan",
+            "fair life protein shake",
+            "fair life shake",
+            "core power shake",
+            "core power elite",
+        ],
+        displayName: "Fairlife Protein Shake",
+        brand: "Fairlife",
+        displayUnit: "bottle",
+        referenceQuantity: 1,
+        referenceUnit: .count,
+        preparation: .unknown,
+        calories: 150,
+        proteinG: 30,
+        carbsG: 4,
+        fatG: 2.5,
+        source: .manufacturer,
+        confidence: .high,
+        barcode: nil,
+        notes: "Fairlife Nutrition Plan chocolate shake, 11.5 fl oz bottle. 150 kcal, 30 g protein."
+    )
+
+    /// Published Chipotle chicken bowl: chicken, cilantro-lime white rice, black beans,
+    /// fajita vegetables, tomato salsa, cheese, sour cream.
+    static let chipotleChickenBowl = Entry(
+        key: "chipotle_chicken_bowl",
+        aliases: ["chipotle chicken bowl", "chipotle bowl", "chipotle chicken"],
+        displayName: "Chipotle Chicken Bowl",
+        brand: "Chipotle",
+        displayUnit: "bowl",
+        referenceQuantity: 1,
+        referenceUnit: .count,
+        preparation: .unknown,
+        calories: 785,
+        proteinG: 52,
+        carbsG: 73,
+        fatG: 30,
+        source: .restaurant,
+        confidence: .high,
+        barcode: nil,
+        notes: "Chipotle chicken bowl with rice, black beans, fajita vegetables, tomato salsa, cheese, and sour cream."
+    )
+
     static let nesquikCup = Entry(
         key: "nesquik_chocolate_milk",
         aliases: ["nesquik", "chocolate milk"],
@@ -1076,6 +1126,8 @@ enum StapleNutritionDatabase {
         davesKillerBread21WholeGrains,
         hostessTwinkie,
         bigMac,
+        chipotleChickenBowl,
+        fairlifeProteinShake,
         fairlifeChocolateCup,
         nesquikCup,
         coconutMilkCup,
@@ -1388,7 +1440,7 @@ enum StapleNutritionDatabase {
         if haystack.contains("ground beef") {
             return portion.unit == .cup ? groundBeefCookedCup : groundBeefCooked
         }
-        if haystack.contains("chicken") {
+        if haystack.contains("chicken"), !haystack.contains("chipotle") {
             if portion.preparation == .raw { return chickenBreastRaw }
             return chickenBreastCooked
         }

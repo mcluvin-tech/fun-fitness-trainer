@@ -361,13 +361,14 @@ enum MealLogging {
         shareToPack(meal: meal)
     }
 
-    /// Swap a just-logged estimate for label-backed Open Food Facts data without adding duplicate rows.
-    static func replace(meals: [Meal], with payload: MealPayload, in context: ModelContext) {
-        guard !meals.isEmpty else { return }
+    /// Swap a just-logged estimate for a resolved meal without adding duplicate rows.
+    @discardableResult
+    static func replace(meals: [Meal], with payload: MealPayload, in context: ModelContext) -> [Meal] {
+        guard !meals.isEmpty else { return [] }
         for meal in meals {
             context.delete(meal)
         }
-        insert(payload, into: context)
+        return insertReturningMeals(payload, into: context)
     }
 
     static func shareToPack(_ meals: [(name: String, calories: Double, proteinG: Double, loggedAt: Date)]) {

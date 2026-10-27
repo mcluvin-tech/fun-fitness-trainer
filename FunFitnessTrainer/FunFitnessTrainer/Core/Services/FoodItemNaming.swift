@@ -81,9 +81,15 @@ enum FoodItemNaming {
         ({ $0.contains("power green bowl") || $0.contains("powder green bowl") }, "Power Green Bowl"),
         ({ $0.contains("sugar free") && ($0.contains("latte") || $0.contains("vanilla")) }, "Sugar Free Vanilla Latte"),
         ({ $0.contains("sugar-free") && ($0.contains("latte") || $0.contains("vanilla")) }, "Sugar Free Vanilla Latte"),
+        ({ $0.contains("chipotle") && ($0.contains("bowl") || $0.contains("chicken")) }, "Chipotle Chicken Bowl"),
+        ({
+            ($0.contains("fairlife") || $0.contains("fair life") || $0.contains("core power"))
+                && ($0.contains("shake") || $0.contains("nutrition plan"))
+        }, "Fairlife Protein Shake"),
         ({
             ($0.contains("fairlife") || $0.contains("fair life"))
                 && ($0.contains("chocolate") || $0.contains("core power"))
+                && !$0.contains("shake")
         }, "Fairlife Chocolate Milk"),
         ({ $0.contains("fairlife") || $0.contains("fair life") }, "Fairlife Milk"),
     ]
@@ -387,14 +393,21 @@ enum FoodItemNaming {
     private static func detectKind(in text: String) -> FoodKind? {
         if text.contains("power green") || text.contains("powder green") { return .powerGreenBowl }
         if text.contains("big mac") || text.contains("bigmac") { return .bigMac }
-        if matchesFoodToken(text, "chips") || matchesFoodToken(text, "chip") { return .chips }
+        if (matchesFoodToken(text, "chips") || matchesFoodToken(text, "chip")),
+           !text.contains("bar"), !text.contains("cookie"), !text.contains("quest") {
+            return .chips
+        }
         if text.contains("sandwich") { return .sandwich }
         if text.contains("egg") { return .eggs }
         if text.contains("almond butter") { return .almondButter }
         if text.contains("peanut butter") { return .peanutButter }
         if text.contains("toast") || text.contains("bread") || text.contains("dave") {
-            let brand = text.contains("dave") ? "Dave's" : nil
-            return .toast(brand: brand)
+            // "Cinnamon Toast Cereal" is a box of cereal, not a slice of bread.
+            let packagedCereal = text.contains("cereal") || text.contains("crunch") || text.contains("catalina")
+            if !packagedCereal {
+                let brand = text.contains("dave") ? "Dave's" : nil
+                return .toast(brand: brand)
+            }
         }
         if text.contains("ground beef") { return .groundBeef }
         if text.contains("carrot") { return .carrots }
@@ -402,7 +415,7 @@ enum FoodItemNaming {
         if matchesFoodToken(text, "butter") && !text.contains("peanut") && !text.contains("almond") && !text.contains("nut") {
             return .butter
         }
-        if text.contains("chicken") { return .chicken }
+        if text.contains("chicken"), !text.contains("chipotle") { return .chicken }
         if text.contains("salmon") || text.contains("fish") { return .fish }
         if text.contains("yogurt") || text.contains("greek") { return .yogurt }
         if text.contains("rice") { return .rice }

@@ -253,126 +253,206 @@ enum FoodAnalysisService {
         )
     }
 
-    /// Voice/text logging: staples first (eggs / Dave's), else Open Food Facts, else offline rules.
+    /// Voice/text logging. Each food in the phrase is resolved on its own:
+    /// a covering staple, then a branded catalog match, then generic USDA / Open Food Facts.
     static func resolveMealForLogging(from description: String) async -> MealPayload {
+        await resolveFoodLog(from: description).meal
+    }
+
+    /// Same lookup as `resolveMealForLogging`, plus other real products when the match is uncertain.
+    static func resolveFoodLog(from description: String) async -> FoodLookupOutcome {
         let query = description.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !query.isEmpty else { return estimateOffline(from: description) }
-
-        let offline = estimateOffline(from: description)
-        if offline.lineItems.count > 1 || offline.entriesForLogging().count > 1 {
-            // #region agent log
-            AgentDebugLog.emit(
-                hypothesisId: "E",
-                location: "FoodAnalysisService.resolveMealForLogging",
-                message: "skipped lookup for multi-item meal",
-                data: [
-                    "query": query,
-                    "lineItems": offline.lineItems.count,
-                    "calories": offline.calories,
-                    "protein": offline.proteinG,
-                ]
-            )
-            // #endregion
-            return offline
+        guard !query.isEmpty else {
+            return FoodLookupOutcome(meal: estimateOffline(from: description), choices: [], needsConfirmation: false)
         }
 
-        // Branded staples (Dave's 110/slice, eggs, …) — never let a web hit clobber them.
-        if StapleNutritionDatabase.match(in: description) != nil {
-            // #region agent log
-            AgentDebugLog.emit(
-                hypothesisId: "A",
-                location: "FoodAnalysisService.resolveMealForLogging",
-                message: "staple matched, skipping lookup",
-                data: [
-                    "query": query,
-                    "calories": offline.calories,
-                    "protein": offline.proteinG,
-                    "source": offline.source.rawValue,
-                ]
-            )
-            // #endregion
-            return offline
+        let source = FoodItemNaming.extractFoodReference(from: query)
+            ?? FoodItemNaming.loggedFoodDescription(from: query)
+            ?? FoodItemNaming.foodListForEstimation(from: query)
+        let segments = foodSegments(from: source)
+        guard !segments.isEmpty else {
+            return FoodLookupOutcome(meal: estimateOffline(from: description), choices: [], needsConfirmation: false)
         }
 
-        if let food = await USDAFoodDataService.lookupGeneric(query: query) {
-            let fromUSDA = mealPayload(from: food, userDescription: description)
-            // #region agent log
-            AgentDebugLog.emit(
-                hypothesisId: "B",
-                location: "FoodAnalysisService.resolveMealForLogging",
-                message: "using USDA lookup",
-                data: [
-                    "query": query,
-                    "usdaName": food.name,
-                    "grams": food.grams,
-                    "unit": fromUSDA.unit,
-                    "calories": fromUSDA.calories,
-                    "protein": fromUSDA.proteinG,
-                    "carbs": fromUSDA.carbsG,
-                    "fat": fromUSDA.fatG,
-                    "assumedPortion": food.assumedPortion,
-                    "runId": "post-fix",
-                ]
-            )
-            // #endregion
-            return fromUSDA
+        var pieces: [SegmentLookup] = []
+        for segment in segments {
+            pieces.append(await resolveFoodSegment(segment))
+        }
+        return outcome(from: pieces)
+    }
+
+    /// A label-backed or higher-priority lookup should replace the first guess.
+    static func lookupShouldReplace(original: MealPayload, resolved: MealPayload) -> Bool {
+        if resolved.isLabelBacked || resolved.source.priority < original.source.priority {
+            return true
+        }
+        return resolved.entriesForLogging().contains { entry in
+            entry.isLabelBacked || entry.source.isExact || entry.source.priority < original.source.priority
+        }
+    }
+
+    private struct SegmentLookup {
+        var meal: MealPayload
+        var alternatives: [MealPayload]
+        var needsConfirmation: Bool
+    }
+
+    private static func resolveFoodSegment(_ segment: String) async -> SegmentLookup {
+        let phrase = BrandedFoodResolver.correctedPhrase(segment)
+        if BrandedFoodResolver.trustedStapleCovers(phrase) {
+            return SegmentLookup(meal: estimateOffline(from: phrase), alternatives: [], needsConfirmation: false)
         }
 
-        do {
-            if let product = try await OpenFoodFactsService.searchBestMatch(query: query) {
-                let fromOFF = mealPayload(from: product, userDescription: description)
-                let preferOffline = shouldPreferOffline(over: fromOFF, offline: offline, userDescription: description)
+        if BrandedFoodResolver.shouldSearchCatalog(phrase),
+           let resolution = await BrandedFoodResolver.resolve(query: phrase) {
+            let best = meal(from: resolution.best, userDescription: segment)
+            let alternatives = resolution.alternatives.map { meal(from: $0, userDescription: segment) }
+            return SegmentLookup(
+                meal: best,
+                alternatives: alternatives,
+                needsConfirmation: resolution.needsConfirmation
+            )
+        }
+
+        if !BrandedFoodResolver.shouldSearchCatalog(phrase) {
+            if let food = await USDAFoodDataService.lookupGeneric(query: phrase) {
+                let fromUSDA = mealPayload(from: food, userDescription: segment)
                 // #region agent log
                 AgentDebugLog.emit(
-                    hypothesisId: "C",
-                    location: "FoodAnalysisService.resolveMealForLogging",
-                    message: preferOffline ? "kept offline over OFF" : "using OFF match",
+                    hypothesisId: "B",
+                    location: "FoodAnalysisService.resolveFoodSegment",
+                    message: "using USDA generic lookup",
                     data: [
-                        "query": query,
-                        "product": product.name,
-                        "offCalories": fromOFF.calories,
-                        "offProtein": fromOFF.proteinG,
-                        "offlineCalories": offline.calories,
-                        "offlineProtein": offline.proteinG,
-                        "labelBacked": fromOFF.isLabelBacked,
-                        "preferOffline": preferOffline,
+                        "query": phrase,
+                        "usdaName": food.name,
+                        "calories": fromUSDA.calories,
+                        "protein": fromUSDA.proteinG,
                     ]
                 )
                 // #endregion
-                if preferOffline {
-                    return offline
-                }
-                return fromOFF
+                return SegmentLookup(meal: fromUSDA, alternatives: [], needsConfirmation: false)
             }
-            // #region agent log
-            AgentDebugLog.emit(
-                hypothesisId: "B",
-                location: "FoodAnalysisService.resolveMealForLogging",
-                message: "OFF search returned nil",
-                data: [
-                    "query": query,
-                    "offlineCalories": offline.calories,
-                    "offlineProtein": offline.proteinG,
-                    "offlineSource": offline.source.rawValue,
-                ]
-            )
-            // #endregion
-        } catch {
-            // #region agent log
-            AgentDebugLog.emit(
-                hypothesisId: "B",
-                location: "FoodAnalysisService.resolveMealForLogging",
-                message: "OFF search threw",
-                data: [
-                    "query": query,
-                    "error": String(describing: error),
-                    "offlineCalories": offline.calories,
-                    "offlineProtein": offline.proteinG,
-                ]
-            )
-            // #endregion
+
+            let offline = estimateOffline(from: phrase)
+            if let product = try? await OpenFoodFactsService.searchBestMatch(query: phrase) {
+                let fromOFF = mealPayload(from: product, userDescription: segment)
+                if !shouldPreferOffline(over: fromOFF, offline: offline, userDescription: segment) {
+                    return SegmentLookup(meal: fromOFF, alternatives: [], needsConfirmation: false)
+                }
+            }
+            return SegmentLookup(meal: offline, alternatives: [], needsConfirmation: false)
         }
-        return offline
+
+        return SegmentLookup(meal: estimateOffline(from: phrase), alternatives: [], needsConfirmation: false)
+    }
+
+    private static func meal(from hit: BrandedFoodHit, userDescription: String) -> MealPayload {
+        let product = BarcodeProductResult(
+            barcode: hit.barcode ?? "",
+            name: hit.name,
+            brand: hit.brand,
+            servingDescription: hit.servingDescription,
+            imageURL: nil,
+            perServing: hit.perServing,
+            servingQuantityMl: nil
+        )
+        var meal = mealPayload(from: product, userDescription: userDescription)
+        if meal.barcode?.isEmpty != false {
+            meal.barcode = nil
+        }
+        meal.source = hit.source
+        meal.isLabelBacked = true
+        meal.confidence = hit.score >= 0.85 ? .high : .medium
+        if let brand = hit.brand?.trimmingCharacters(in: .whitespacesAndNewlines), !brand.isEmpty {
+            meal.brand = brand
+            if !hit.name.lowercased().contains(brand.lowercased()) {
+                meal.name = "\(brand) \(hit.name)"
+            } else {
+                meal.name = hit.name
+            }
+        } else {
+            meal.name = hit.name
+        }
+        let origin = hit.source == .usda ? "USDA Branded" : "Open Food Facts"
+        var assumption = "\(origin): \(hit.name)"
+        if let serving = hit.servingDescription, !serving.isEmpty {
+            assumption += " (\(serving))"
+        }
+        assumption += String(format: ". Match confidence %.0f%%.", hit.score * 100)
+        meal.assumptions = [assumption]
+        return meal
+    }
+
+    private static func outcome(from pieces: [SegmentLookup]) -> FoodLookupOutcome {
+        let meals = pieces.map(\.meal)
+        let combined = combineResolvedMeals(meals)
+        var choices: [FoodLookupChoice] = []
+        var needsConfirmation = false
+        for (index, piece) in pieces.enumerated() {
+            let options = piece.needsConfirmation ? [piece.meal] + piece.alternatives : piece.alternatives
+            if piece.needsConfirmation, !options.isEmpty {
+                needsConfirmation = true
+            }
+            for (offset, option) in options.enumerated() {
+                var spliced = meals
+                spliced[index] = option
+                let meal = combineResolvedMeals(spliced)
+                let title = option.entriesForLogging().first?.name ?? option.name
+                let calories = MacroTrackingEngine.displayCalories(meal.calories)
+                let protein = MacroTrackingEngine.displayGrams(meal.proteinG)
+                let detail = meal.lineItems.count > 1
+                    ? "\(calories) cal with the rest of this meal · \(protein)g protein"
+                    : "\(calories) cal · \(protein)g protein"
+                choices.append(FoodLookupChoice(
+                    id: "\(index)-\(offset)-\(title)-\(calories)",
+                    title: title,
+                    detail: detail,
+                    meal: meal
+                ))
+            }
+        }
+        if choices.isEmpty { needsConfirmation = false }
+        return FoodLookupOutcome(meal: combined, choices: choices, needsConfirmation: needsConfirmation)
+    }
+
+    private static func combineResolvedMeals(_ meals: [MealPayload]) -> MealPayload {
+        guard meals.count > 1 else {
+            return meals.first ?? MealPayload(name: "Meal", calories: 0, proteinG: 0, carbsG: 0, fatG: 0)
+        }
+        let items = meals.map { meal -> MealLineItem in
+            let entry = meal.entriesForLogging().first ?? meal
+            return MealLineItem(
+                name: entry.name,
+                calories: entry.calories,
+                proteinG: entry.proteinG,
+                carbsG: entry.carbsG,
+                fatG: entry.fatG,
+                quantity: entry.quantity,
+                unit: entry.unit,
+                preparationState: entry.preparationState,
+                brand: entry.brand,
+                source: entry.source.rawValue,
+                confidence: entry.confidence.rawValue
+            )
+        }
+        let totals = MacroTrackingEngine.recipeTotals(items.map {
+            MacroTotals(calories: $0.calories, proteinG: $0.proteinG, carbsG: $0.carbsG, fatG: $0.fatG)
+        })
+        let worst = meals.map(\.source).max { $0.priority < $1.priority } ?? .genericEstimate
+        let protected = meals.allSatisfy { $0.isLabelBacked || $0.source.isExact }
+        let confidence: MacroTrackingEngine.NutritionConfidence = meals.contains { $0.confidence == .low } ? .low : .medium
+        return MealPayload(
+            name: "Meal",
+            calories: totals.calories,
+            proteinG: totals.proteinG,
+            carbsG: totals.carbsG,
+            fatG: totals.fatG,
+            lineItems: items,
+            isLabelBacked: protected,
+            assumptions: meals.flatMap(\.assumptions),
+            source: worst,
+            confidence: confidence
+        )
     }
 
     static func mealPayload(from food: USDAGenericFood, userDescription: String) -> MealPayload {

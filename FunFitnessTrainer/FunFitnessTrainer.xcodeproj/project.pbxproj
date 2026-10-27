@@ -35,6 +35,7 @@
 		DAD6831440CF459AAA9DDB40 /* Core/Models/DailyGoal.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9531C1B012AC4973888F0EA3 /* Core/Models/DailyGoal.swift */; };
 		E63017F874A84914A004A398 /* Core/Persistence/PersistenceController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 589308E48E584934A69191D4 /* Core/Persistence/PersistenceController.swift */; };
 		F0AB52D359B945BAAF481C67 /* Core/Services/FoodAnalysisService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6629E6D0D6014B5D8FDF5EBE /* Core/Services/FoodAnalysisService.swift */; };
+		B4R4N4D3D5F0O0D4R0E0S2 /* Core/Services/BrandedFoodResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = B4R4N4D3D5F0O0D4R0E0S1 /* Core/Services/BrandedFoodResolver.swift */; };
 		M4C1R2O3T4R5A6C7K8E9N0G1 /* Core/Services/MacroTrackingEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = M4C1R2O3T4R5A6C7K8E9N0G2 /* Core/Services/MacroTrackingEngine.swift */; };
 		F0O1D2Q3U4A5N6T7I8T9Y0A1 /* Core/Services/FoodQuantity.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0O1D2Q3U4A5N6T7I8T9Y0B1 /* Core/Services/FoodQuantity.swift */; };
 		F00D1T3M4N5A6M7E8B9U0I1L2 /* Core/Services/FoodItemNaming.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00D1T3M4N5A6M7E8B9U0I1L3 /* Core/Services/FoodItemNaming.swift */; };
@@ -71,6 +72,7 @@
 		F0O1D2P3H4O5T6O7L8O9C0A1 /* Core/Services/FoodPhotoLocalAnalysis.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0O1D2P3H4O5T6O7L8O9C0B1 /* Core/Services/FoodPhotoLocalAnalysis.swift */; };
 		T0E1S2T3B4U5N6D7L8E9F0B1 /* PhotoMacroPipelineTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = T0E1S2T3B4U5N6D7L8E9F0A1 /* PhotoMacroPipelineTests.swift */; };
 		C4L0R1E2A3C4C5U6R7A8C9Y2 /* CalorieAccuracyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C4L0R1E2A3C4C5U6R7A8C9Y1 /* CalorieAccuracyTests.swift */; };
+		B4R4N4D3D5F0O0D4L0O0K2 /* BrandedFoodLookupTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B4R4N4D3D5F0O0D4L0O0K1 /* BrandedFoodLookupTests.swift */; };
 		A7E1B0010000000000000002 /* Core/Services/LarryNutritionJudge.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7E1B0010000000000000001 /* Core/Services/LarryNutritionJudge.swift */; };
 		A7E1B0020000000000000002 /* Core/Models/LarryEmotion.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7E1B0020000000000000001 /* Core/Models/LarryEmotion.swift */; };
 		A7E1B0030000000000000002 /* Core/Services/LarryQuoteBank.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7E1B0030000000000000001 /* Core/Services/LarryQuoteBank.swift */; };
@@ -109,6 +111,7 @@
 		6457A11AD64D4422BD0954F0 /* FunFitnessTrainer.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = FunFitnessTrainer.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		65950BAD3CB146E3A44C0410 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		6629E6D0D6014B5D8FDF5EBE /* Core/Services/FoodAnalysisService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Core/Services/FoodAnalysisService.swift; sourceTree = "<group>"; };
+		B4R4N4D3D5F0O0D4R0E0S1 /* Core/Services/BrandedFoodResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Core/Services/BrandedFoodResolver.swift; sourceTree = "<group>"; };
 		M4C1R2O3T4R5A6C7K8E9N0G2 /* Core/Services/MacroTrackingEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Core/Services/MacroTrackingEngine.swift; sourceTree = "<group>"; };
 		F0O1D2Q3U4A5N6T7I8T9Y0B1 /* Core/Services/FoodQuantity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Core/Services/FoodQuantity.swift; sourceTree = "<group>"; };
 		F00D1T3M4N5A6M7E8B9U0I1L3 /* Core/Services/FoodItemNaming.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Core/Services/FoodItemNaming.swift; sourceTree = "<group>"; };
@@ -154,6 +157,7 @@
 		N0T1I2F3I4C5A6T7I8O9N0B1 /* Core/Services/NotificationService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Core/Services/NotificationService.swift; sourceTree = "<group>"; };
 		T0E1S2T3B4U5N6D7L8E9F0A1 /* PhotoMacroPipelineTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhotoMacroPipelineTests.swift; sourceTree = "<group>"; };
 		C4L0R1E2A3C4C5U6R7A8C9Y1 /* CalorieAccuracyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CalorieAccuracyTests.swift; sourceTree = "<group>"; };
+		B4R4N4D3D5F0O0D4L0O0K1 /* BrandedFoodLookupTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrandedFoodLookupTests.swift; sourceTree = "<group>"; };
 		A7E1B0010000000000000001 /* Core/Services/LarryNutritionJudge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Core/Services/LarryNutritionJudge.swift; sourceTree = "<group>"; };
 		A7E1B0020000000000000001 /* Core/Models/LarryEmotion.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Core/Models/LarryEmotion.swift; sourceTree = "<group>"; };
 		A7E1B0030000000000000001 /* Core/Services/LarryQuoteBank.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Core/Services/LarryQuoteBank.swift; sourceTree = "<group>"; };
@@ -209,6 +213,7 @@
 				52D2250076694BAC8350E529 /* Core/Services/GoalCalculator.swift */,
 				DD691FBCB6AA4A6EAD3FCC43 /* Core/Services/SupabaseService.swift */,
 				6629E6D0D6014B5D8FDF5EBE /* Core/Services/FoodAnalysisService.swift */,
+				B4R4N4D3D5F0O0D4R0E0S1 /* Core/Services/BrandedFoodResolver.swift */,
 				M4C1R2O3T4R5A6C7K8E9N0G2 /* Core/Services/MacroTrackingEngine.swift */,
 				F0O1D2Q3U4A5N6T7I8T9Y0B1 /* Core/Services/FoodQuantity.swift */,
 				F0O1D2P3H4O5T6O7L8O9C0B1 /* Core/Services/FoodPhotoLocalAnalysis.swift */,
@@ -283,6 +288,7 @@
 			children = (
 				T0E1S2T3B4U5N6D7L8E9F0A1 /* PhotoMacroPipelineTests.swift */,
 				C4L0R1E2A3C4C5U6R7A8C9Y1 /* CalorieAccuracyTests.swift */,
+				B4R4N4D3D5F0O0D4L0O0K1 /* BrandedFoodLookupTests.swift */,
 				A7E1B0070000000000000001 /* LarryReactionEngineTests.swift */,
 				F1C4A11E0000000000000009 /* FriendChallengeTests.swift */,
 			);
@@ -404,6 +410,7 @@
 				D783AD1307A84C41B6B5BE51 /* Core/Services/GoalCalculator.swift in Sources */,
 				18D8E69024E140BFB98EEEBC /* Core/Services/SupabaseService.swift in Sources */,
 				F0AB52D359B945BAAF481C67 /* Core/Services/FoodAnalysisService.swift in Sources */,
+				B4R4N4D3D5F0O0D4R0E0S2 /* Core/Services/BrandedFoodResolver.swift in Sources */,
 				M4C1R2O3T4R5A6C7K8E9N0G1 /* Core/Services/MacroTrackingEngine.swift in Sources */,
 				F0O1D2Q3U4A5N6T7I8T9Y0A1 /* Core/Services/FoodQuantity.swift in Sources */,
 				F0O1D2P3H4O5T6O7L8O9C0A1 /* Core/Services/FoodPhotoLocalAnalysis.swift in Sources */,
@@ -468,6 +475,7 @@
 			files = (
 				T0E1S2T3B4U5N6D7L8E9F0B1 /* PhotoMacroPipelineTests.swift in Sources */,
 				C4L0R1E2A3C4C5U6R7A8C9Y2 /* CalorieAccuracyTests.swift in Sources */,
+				B4R4N4D3D5F0O0D4L0O0K2 /* BrandedFoodLookupTests.swift in Sources */,
 				A7E1B0070000000000000002 /* LarryReactionEngineTests.swift in Sources */,
 				F1C4A11E000000000000000A /* FriendChallengeTests.swift in Sources */,
 			);

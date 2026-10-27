@@ -55,6 +55,10 @@ struct CoachChatView: View {
     @State private var dinnerPlates: [TrainerService.DinnerPlate] = []
     @State private var dinnerHeader = ""
     @State private var platesAppeared = false
+    /// Other real products when a typed or spoken food was ambiguous.
+    @State private var foodChoices: [FoodLookupChoice] = []
+    @State private var foodChoicePrompt = ""
+    @State private var mealsAwaitingFoodChoice: [Meal] = []
 
     private var todayMeals: [Meal] {
         DaySummaryService.mealsToday(from: allMeals)
@@ -183,6 +187,11 @@ struct CoachChatView: View {
                                     .frame(maxWidth: .infinity)
                                     .frame(minHeight: keyboardOverlap > 0 ? 220 : 360)
                                     .id("conversationTop")
+                            }
+                            if !foodChoices.isEmpty {
+                                foodChoicePanel
+                                    .padding(.horizontal, 16)
+                                    .padding(.top, 8)
                             }
                             Color.clear.frame(height: 12).id("conversationBottom")
                         }
@@ -404,6 +413,49 @@ struct CoachChatView: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel("\(plate.name), \(plate.calories) calories, \(plate.protein) grams protein. Log this.")
+    }
+
+    private var foodChoicePanel: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(foodChoicePrompt.isEmpty ? "Not that one?" : foodChoicePrompt)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(BrandTheme.homeSecondaryText)
+            ForEach(foodChoices) { choice in
+                Button {
+                    HomeHaptics.soft()
+                    pickFoodChoice(choice)
+                } label: {
+                    HStack(alignment: .center, spacing: 12) {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(choice.title)
+                                .font(.subheadline.weight(.bold))
+                                .foregroundStyle(BrandTheme.homePrimaryText)
+                                .multilineTextAlignment(.leading)
+                                .fixedSize(horizontal: false, vertical: true)
+                            Text(choice.detail)
+                                .font(.caption.weight(.medium))
+                                .foregroundStyle(BrandTheme.teal)
+                        }
+                        Spacer(minLength: 4)
+                        Text("Log this")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(BrandTheme.homeSecondaryText)
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 12)
+                    .background {
+                        RoundedRectangle(cornerRadius: 16, style: .continuous)
+                            .fill(BrandTheme.homeCardSolid.opacity(0.92))
+                    }
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 16, style: .continuous)
+                            .stroke(Color.white.opacity(0.06), lineWidth: 0.5)
+                    }
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("\(choice.title). \(choice.detail). Log this.")
+            }
+        }
     }
 
     private var larryStage: some View {
@@ -719,6 +771,9 @@ struct CoachChatView: View {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         input = ""
+        foodChoices = []
+        foodChoicePrompt = ""
+        mealsAwaitingFoodChoice = []
         messages.append(ChatBubble(text: trimmed, isUser: true))
         persistChat()
         withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) {
@@ -833,6 +888,9 @@ struct CoachChatView: View {
             dinnerPlates = []
             dinnerHeader = ""
             dismissAfterReply = false
+            foodChoices = []
+            foodChoicePrompt = ""
+            mealsAwaitingFoodChoice = []
         }
     }
 
@@ -861,35 +919,60 @@ struct CoachChatView: View {
         if let snapshot = LarryReactionSnapshot.capturing(loggedMeals: inserted, in: context) {
             appState.presentLarryReaction(snapshot, afterSheetDismiss: false)
         }
-
-        guard payload.lineItems.count <= 1, inserted.count <= 1 else { return }
+        guard !inserted.isEmpty else { return }
 
         let source = latestFoodLogDescription() ?? payload.name
         Task {
-            let resolved = await FoodAnalysisService.resolveMealForLogging(from: source)
+            let outcome = await FoodAnalysisService.resolveFoodLog(from: source)
             // #region agent log
             AgentDebugLog.emit(
                 hypothesisId: "C",
                 location: "CoachChatView.applySuggestedMeal",
-                message: resolved.isLabelBacked ? "replacing meal with lookup" : "lookup not label-backed, kept first estimate",
+                message: outcome.needsConfirmation ? "asking which product" : "resolved typed food",
                 data: [
                     "source": source,
                     "initialCalories": payload.calories,
-                    "initialProtein": payload.proteinG,
-                    "initialSource": payload.source.rawValue,
-                    "resolvedCalories": resolved.calories,
-                    "resolvedProtein": resolved.proteinG,
-                    "resolvedSource": resolved.source.rawValue,
-                    "labelBacked": resolved.isLabelBacked,
+                    "resolvedCalories": outcome.meal.calories,
+                    "resolvedProtein": outcome.meal.proteinG,
+                    "resolvedSource": outcome.meal.source.rawValue,
+                    "choices": outcome.choices.count,
+                    "needsConfirmation": outcome.needsConfirmation,
                 ]
             )
             // #endregion
-            let lookupBeatsPlaceholder = resolved.source.priority < payload.source.priority
-            guard resolved.isLabelBacked || lookupBeatsPlaceholder else { return }
             await MainActor.run {
-                MealLogging.replace(meals: inserted, with: resolved, in: context)
+                if outcome.needsConfirmation, !outcome.choices.isEmpty {
+                    for meal in inserted {
+                        context.delete(meal)
+                    }
+                    try? context.save()
+                    mealsAwaitingFoodChoice = []
+                    foodChoices = outcome.choices
+                    foodChoicePrompt = "Which one should I log?"
+                    return
+                }
+                guard FoodAnalysisService.lookupShouldReplace(original: payload, resolved: outcome.meal) else {
+                    foodChoices = []
+                    foodChoicePrompt = ""
+                    return
+                }
+                let logged = MealLogging.replace(meals: inserted, with: outcome.meal, in: context)
+                mealsAwaitingFoodChoice = logged
+                foodChoices = outcome.choices
+                foodChoicePrompt = outcome.choices.isEmpty ? "" : "Not that one?"
             }
         }
+    }
+
+    private func pickFoodChoice(_ choice: FoodLookupChoice) {
+        if mealsAwaitingFoodChoice.isEmpty {
+            _ = MealLogging.insertReturningMeals(choice.meal, into: context)
+        } else {
+            _ = MealLogging.replace(meals: mealsAwaitingFoodChoice, with: choice.meal, in: context)
+        }
+        foodChoices = []
+        foodChoicePrompt = ""
+        mealsAwaitingFoodChoice = []
     }
 
     @discardableResult

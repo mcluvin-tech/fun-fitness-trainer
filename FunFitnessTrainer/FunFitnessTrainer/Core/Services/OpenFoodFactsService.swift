@@ -1,6 +1,6 @@
 import Foundation
 
-struct BarcodeProductResult: Equatable {
+struct BarcodeProductResult: Equatable, Sendable {
     let barcode: String
     let name: String
     let brand: String?

@@ -1,7 +1,7 @@
 import Foundation
 
 /// One packaged or restaurant product returned by a brand catalog.
-struct BrandedFoodHit: Equatable {
+struct BrandedFoodHit: Equatable, Sendable {
     var name: String
     var brand: String?
     var perServing: MacroTotals
@@ -43,15 +43,20 @@ protocol BrandedFoodCatalog {
 struct LiveBrandedFoodCatalog: BrandedFoodCatalog {
     func searchBranded(query: String) async -> [BrandedFoodHit] {
         await Self.combiningIndependentResults(
-            usda: { await Self.usdaHits(query) },
-            off: { await Self.offHits(query) }
+            usda: { @Sendable in
+                await Self.usdaHits(query)
+            },
+            off: { @Sendable in
+                await Self.offHits(query)
+            }
         )
     }
 
     /// Each side catches its own failure. A 503 or timeout from one catalog cannot cancel the other.
+    /// The closures are escaping and sendable because `TaskGroup.addTask` stores them on another task.
     static func combiningIndependentResults(
-        usda: () async throws -> [BrandedFoodHit],
-        off: () async throws -> [BrandedFoodHit]
+        usda: @escaping @Sendable () async throws -> [BrandedFoodHit],
+        off: @escaping @Sendable () async throws -> [BrandedFoodHit]
     ) async -> [BrandedFoodHit] {
         await withTaskGroup(of: (String, [BrandedFoodHit]).self) { group in
             group.addTask {
@@ -110,7 +115,11 @@ struct LiveBrandedFoodCatalog: BrandedFoodCatalog {
                 await OpenFoodFactsService.searchCandidates(query: query)
             }
             group.addTask {
-                try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                do {
+                    try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                } catch {
+                    return nil
+                }
                 return nil
             }
             let first = await group.next() ?? nil

@@ -117,7 +117,7 @@ final class Meal {
     }
 }
 
-struct MacroTotals: Equatable {
+struct MacroTotals: Equatable, Sendable {
     var calories: Double = 0
     var proteinG: Double = 0
     var carbsG: Double = 0

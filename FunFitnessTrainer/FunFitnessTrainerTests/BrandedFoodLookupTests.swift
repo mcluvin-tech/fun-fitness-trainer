@@ -222,8 +222,12 @@ final class BrandedFoodLookupTests: XCTestCase {
             serving: "1/2 cup (36 g)"
         )
         let hits = await LiveBrandedFoodCatalog.combiningIndependentResults(
-            usda: { [cereal] },
-            off: { throw URLError(.badServerResponse) }
+            usda: { @Sendable () async throws -> [BrandedFoodHit] in
+                [cereal]
+            },
+            off: { @Sendable () async throws -> [BrandedFoodHit] in
+                throw URLError(.badServerResponse)
+            }
         )
         XCTAssertEqual(hits.count, 1)
         XCTAssertEqual(hits[0].source, .usda)

@@ -91,7 +91,11 @@ final class VoiceCoachService: NSObject, ObservableObject {
         while Date() < deadline {
             let snapshot = transcriptBox.snapshot()
             if snapshot.isFinal, !snapshot.text.isEmpty { break }
-            try? await Task.sleep(nanoseconds: 50_000_000)
+            do {
+                try await Task.sleep(nanoseconds: 50_000_000)
+            } catch {
+                break
+            }
         }
 
         recognitionTask?.cancel()

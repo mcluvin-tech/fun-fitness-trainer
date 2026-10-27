@@ -12,7 +12,7 @@ enum MacroTrackingEngine {
     // MARK: - Source / confidence
 
     /// Lower number = higher priority. Never invent values when a better source exists.
-    enum NutritionSource: String, Codable, CaseIterable {
+    enum NutritionSource: String, Codable, CaseIterable, Sendable {
         case userLabel = "user_label"
         case userProvided = "user_provided"
         case restaurant = "restaurant"

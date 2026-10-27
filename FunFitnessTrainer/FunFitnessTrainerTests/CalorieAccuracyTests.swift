@@ -368,6 +368,118 @@ final class CalorieAccuracyTests: XCTestCase {
         XCTAssertEqual(text, "281")
     }
 
+    func testFoodNamesDropLeftoverUnitsAndFiller() {
+        let names: [(String, String)] = [
+            ("a serving size of canned tuna", "canned tuna"),
+            ("I had a serving size of canned tuna", "canned tuna"),
+            ("Oz Canned Tuna", "canned tuna"),
+            ("4 oz Canned Tuna", "canned tuna"),
+            ("5 oz canned tuna", "canned tuna"),
+            ("one serving of greek yogurt", "greek yogurt"),
+            ("a can of tuna", "tuna"),
+            ("2 cups of rice", "rice"),
+            ("8 fl oz milk", "milk"),
+            ("8 fl oz whole milk", "whole milk"),
+            ("Fl Oz Milk", "milk"),
+            ("some canned tuna", "canned tuna"),
+        ]
+        for (raw, expected) in names {
+            let cleaned = FoodItemNaming.canonicalName(for: raw)
+            XCTAssertEqual(cleaned.lowercased(), expected, raw)
+            XCTAssertEqual(FoodItemNaming.canonicalName(for: cleaned), cleaned, raw)
+            XCTAssertFalse(cleaned.lowercased().contains(" oz"), raw)
+            XCTAssertFalse(cleaned.lowercased().hasPrefix("oz"), raw)
+            XCTAssertFalse(cleaned.lowercased().contains("serving"), raw)
+            XCTAssertFalse(cleaned.lowercased().contains("fl oz"), raw)
+        }
+
+        let beer = FoodItemNaming.canonicalName(for: "16 oz oz oz oz oz pint of beer")
+        XCTAssertEqual(beer.lowercased(), "pint of beer")
+        XCTAssertEqual(FoodItemNaming.canonicalName(for: beer).lowercased(), "pint of beer")
+        XCTAssertEqual(FoodItemNaming.displayTitle(for: "Oz Canned Tuna"), "Canned Tuna")
+
+        XCTAssertFalse(BrandedFoodResolver.shouldSearchCatalog("a serving size of canned tuna"))
+        XCTAssertFalse(BrandedFoodResolver.shouldSearchCatalog("a can of tuna"))
+        XCTAssertFalse(BrandedFoodResolver.shouldSearchCatalog("5 oz canned tuna"))
+    }
+
+    func testCannedTunaServingIsNotAWholeCan() {
+        let serving = logged("a serving size of canned tuna")
+        XCTAssertEqual(serving.name.lowercased(), "canned tuna")
+        XCTAssertEqual(serving.unit, "oz")
+        XCTAssertEqual(serving.quantity, 2, accuracy: 0.05)
+        XCTAssertEqual(serving.calories, 60, accuracy: 3)
+        XCTAssertEqual(serving.proteinG, 13, accuracy: 1)
+        XCTAssertGreaterThanOrEqual(serving.calories, 60)
+        XCTAssertLessThanOrEqual(serving.calories, 70)
+        XCTAssertGreaterThanOrEqual(serving.proteinG, 13)
+        XCTAssertLessThanOrEqual(serving.proteinG, 15)
+
+        let spoken = logged("I had a serving size of canned tuna.")
+        XCTAssertEqual(spoken.name.lowercased(), "canned tuna")
+        XCTAssertEqual(spoken.calories, serving.calories, accuracy: 0.5)
+        XCTAssertEqual(spoken.proteinG, serving.proteinG, accuracy: 0.2)
+
+        let bare = logged("a serving of canned tuna")
+        XCTAssertEqual(bare.calories, serving.calories, accuracy: 0.5)
+        XCTAssertEqual(bare.quantity, 2, accuracy: 0.05)
+
+        let can = logged("a can of tuna")
+        XCTAssertEqual(can.name.lowercased(), "tuna")
+        XCTAssertFalse(can.name.lowercased().contains("oz"))
+        XCTAssertEqual(can.unit, "oz")
+        XCTAssertEqual(can.quantity, 4, accuracy: 0.05)
+        XCTAssertEqual(can.calories, 120, accuracy: 3)
+        XCTAssertEqual(can.proteinG, 26, accuracy: 1)
+        XCTAssertGreaterThanOrEqual(can.calories, 100)
+        XCTAssertLessThanOrEqual(can.calories, 122)
+        XCTAssertGreaterThanOrEqual(can.proteinG, 22)
+        XCTAssertLessThanOrEqual(can.proteinG, 27)
+        XCTAssertGreaterThan(can.calories, serving.calories * 1.7)
+        XCTAssertLessThan(serving.calories, can.calories * 0.6)
+
+        let stated = logged("5 oz canned tuna")
+        XCTAssertEqual(stated.name.lowercased(), "canned tuna")
+        XCTAssertEqual(stated.unit, "oz")
+        XCTAssertEqual(stated.quantity, 5, accuracy: 0.05)
+        XCTAssertEqual(stated.calories, 150, accuracy: 4)
+        XCTAssertGreaterThan(stated.calories, can.calories)
+
+        let yogurt = logged("one serving of greek yogurt")
+        XCTAssertEqual(yogurt.name.lowercased(), "greek yogurt")
+        XCTAssertEqual(yogurt.unit, "cup")
+        XCTAssertEqual(yogurt.quantity, 1, accuracy: 0.05)
+        XCTAssertEqual(yogurt.calories, 100, accuracy: 2)
+        XCTAssertEqual(yogurt.proteinG, 17, accuracy: 0.5)
+
+        let rice = logged("2 cups of rice")
+        XCTAssertEqual(rice.name.lowercased(), "rice")
+        XCTAssertEqual(rice.unit, "cup")
+        XCTAssertEqual(rice.quantity, 2, accuracy: 0.05)
+        XCTAssertEqual(rice.calories, 410, accuracy: 2)
+
+        let milk = logged("8 fl oz milk")
+        XCTAssertEqual(milk.name.lowercased(), "milk")
+        XCTAssertEqual(milk.unit, "fl oz")
+        XCTAssertEqual(milk.quantity, 8, accuracy: 0.05)
+        let expectedMilk = StapleNutritionDatabase.scale(for: "8 fl oz milk")?.totals.calories ?? -1
+        XCTAssertEqual(milk.calories, expectedMilk, accuracy: 1)
+        XCTAssertEqual(milk.calories, 61 * 244 / 100, accuracy: 2)
+
+        let chicken = logged("6 oz chicken")
+        XCTAssertEqual(chicken.name.lowercased(), "chicken")
+        XCTAssertEqual(chicken.quantity, 6, accuracy: 0.05)
+        let expectedChicken = StapleNutritionDatabase.scale(for: "6 oz chicken")?.totals.calories ?? -1
+        XCTAssertEqual(chicken.calories, expectedChicken, accuracy: 1)
+    }
+
+    private func logged(_ phrase: String) -> MealPayload {
+        let meal = FoodAnalysisService.reconcileMealPayload(
+            FoodAnalysisService.estimateOffline(from: phrase)
+        )
+        return meal.entriesForLogging().first ?? meal
+    }
+
     func testStringCalorieJSONDecodes() throws {
         let json = """
         {"name":"Yogurt","calories":"150.5","protein_g":"10","carbs_g":12,"fat_g":"4.5","line_items":[{"name":"Yogurt","calories":"150.5","protein_g":"10","carbs_g":"12","fat_g":4.5}]}

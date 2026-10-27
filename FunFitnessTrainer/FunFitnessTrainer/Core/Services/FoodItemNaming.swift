@@ -261,8 +261,13 @@ enum FoodItemNaming {
         return collapseWhitespace(t)
     }
 
-    /// Short label for a single food segment (e.g. "2 eggs", "6 oz chicken", "Carrots").
+    /// Short label for a single food segment (e.g. "2 eggs", "Chicken", "Carrots").
+    /// The portion stays on the meal's quantity and unit. It is not written into the name.
     static func logLabel(from segment: String, quantity: Double) -> String {
+        displayFoodName(rawLogLabel(from: segment, quantity: quantity))
+    }
+
+    private static func rawLogLabel(from segment: String, quantity: Double) -> String {
         if let measured = measuredLabel(from: segment) {
             return measured
         }
@@ -351,7 +356,7 @@ enum FoodItemNaming {
                 }
             }
         }
-        return stripDashes(named)
+        return stripDashes(displayFoodName(named))
     }
 
     static func sanitizedLineItem(_ item: MealLineItem) -> MealLineItem {
@@ -646,15 +651,72 @@ enum FoodItemNaming {
 
     private static func stripLeadingQuantityWords(_ text: String) -> String {
         var t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Take the unit with the number. Stripping only "4 " from "4 oz canned tuna" left "oz canned tuna".
+        let unit = #"(?:fl\.?\s*oz|fluid\s+ounces?|ounces?|oz|grams?|g|cups?|servings?(?:\s+size)?)\b"#
         let patterns = [
-            #"^(?:about|around|approximately|roughly)\s+(?:a|an|one|\d+(?:\.\d+)?)\s+"#,
-            #"^(?:a|an|one|\d+(?:\.\d+)?)\s+"#,
+            #"^(?:about|around|approximately|roughly)\s+(?:a|an|one|\d+(?:\.\d+)?)(?:\s+"# + unit + #")?\s+"#,
+            #"^(?:a|an|one|\d+(?:\.\d+)?)(?:\s+"# + unit + #")?\s+"#,
+            #"^(?:"# + unit + #")\s+"#,
         ]
         for pattern in patterns {
             guard let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive) else { continue }
             t = regex.stringByReplacingMatches(in: t, range: fullNSRange(for: t), withTemplate: "")
         }
         return t.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Food identity only. Quantity and unit stay on the meal, so a label never starts with "Oz" or "Serving".
+    /// "Pint of beer" keeps its "of"; other "of" words are removed only when they are left hanging on the edge.
+    private static func displayFoodName(_ text: String) -> String {
+        var t = collapseWhitespace(text)
+        guard !t.isEmpty else { return t }
+
+        let patterns = [
+            #"\bi\s+had\b"#,
+            #"\bserving\s+size\b"#,
+            #"\b\d+(?:\.\d+)?\s+fl\.?\s*oz\b"#,
+            #"\b\d+(?:\.\d+)?\s+fluid\s+ounces?\b"#,
+            #"\b\d+(?:\.\d+)?\s+ounces?\b"#,
+            #"\b\d+(?:\.\d+)?\s+oz\b"#,
+            #"\b\d+(?:\.\d+)?\s+grams?\b"#,
+            #"\b\d+(?:\.\d+)?\s+g\b"#,
+            #"\b\d+(?:\.\d+)?\s+cups?\b"#,
+            #"\b\d+(?:\.\d+)?\s+servings?\b"#,
+            #"\bfl\.?\s*oz\b"#,
+            #"\bfluid\s+ounces?\b"#,
+            #"\bounces?\b"#,
+            #"\boz\b"#,
+            #"\bgrams?\b"#,
+            #"\bg\b"#,
+            #"\bcups?\b"#,
+            #"\bservings?\b"#,
+            #"\bcans?\b"#,
+            #"\btins?\b"#,
+            #"\bsome\b"#,
+        ]
+        for pattern in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive) else { continue }
+            t = regex.stringByReplacingMatches(in: t, range: fullNSRange(for: t), withTemplate: " ")
+        }
+        t = collapseWhitespace(t)
+
+        var trimmedEdge = true
+        while trimmedEdge {
+            trimmedEdge = false
+            for pattern in [#"^(?:a|an|of)\s+"#, #"\s+of$"#] {
+                guard let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive) else { continue }
+                let next = collapseWhitespace(
+                    regex.stringByReplacingMatches(in: t, range: fullNSRange(for: t), withTemplate: " ")
+                )
+                if next != t {
+                    trimmedEdge = true
+                    t = next
+                }
+            }
+        }
+
+        if t.isEmpty { return "Food" }
+        return titleCase(t)
     }
 
     /// UTF-16 range for NSRegularExpression (safe with emoji and apostrophes).

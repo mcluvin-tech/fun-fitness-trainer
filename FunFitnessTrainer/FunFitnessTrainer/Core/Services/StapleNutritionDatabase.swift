@@ -1073,9 +1073,9 @@ enum StapleNutritionDatabase {
         key: "tuna_canned",
         aliases: ["tuna"],
         name: "Tuna",
-        calories: 86, proteinG: 19, carbsG: 0, fatG: 1,
-        notes: "USDA canned tuna in water per 100 g. Unspecified can uses 4 oz drained.",
-        defaultPortion: FoodPortion(amount: 4, unit: .ounce, preparation: .unknown)
+        calories: 106, proteinG: 23, carbsG: 0, fatG: 1,
+        notes: "Light tuna in water, drained, per 100 g (about 60 kcal and 13 g protein per 2 oz). A serving is 2 oz (56 g). A can is the drained fish from a typical 5 oz can, about 4 oz, which is two servings. Stated ounces, such as \"5 oz\", scale by weight instead.",
+        defaultPortion: FoodPortion(amount: 2, unit: .ounce, preparation: .unknown)
     )
 
     static let greenBeansCooked = per100g(
@@ -1225,7 +1225,7 @@ enum StapleNutritionDatabase {
         }
 
         // Countable "1 serving" / bare "chicken" against a 100g reference used to scale 1/100.
-        if let assumed = assumedPortionIfUnspecified(consumed: usedPortion, entry: entry) {
+        if let assumed = assumedPortionIfUnspecified(consumed: usedPortion, entry: entry, text: lower) {
             usedPortion = assumed.portion
             usedDefaultPortion = true
             assumptions.append(assumed.assumption)
@@ -1380,9 +1380,25 @@ enum StapleNutritionDatabase {
     /// Bare "chicken" parses as 1 count. Never divide that count by a 100g reference.
     private static func assumedPortionIfUnspecified(
         consumed: FoodPortion,
-        entry: Entry
+        entry: Entry,
+        text: String
     ) -> (portion: FoodPortion, assumption: String)? {
         guard consumed.unit.isCountable else { return nil }
+
+        // "can" is not "canned". A stated weight ("5 oz") is not countable, so it never comes through here.
+        if entry.key == "tuna_canned", mentionsWholeCan(text) {
+            let cans = max(consumed.amount, 1)
+            let portion = FoodPortion(
+                amount: 4 * cans,
+                unit: .ounce,
+                preparation: consumed.preparation
+            )
+            return (
+                portion,
+                "A can of tuna is the drained fish from a typical 5 oz can, about 4 oz (two 2 oz label servings). A serving stays 2 oz."
+            )
+        }
+
         let fallback: FoodPortion
         if let listed = entry.defaultLoggedPortion {
             fallback = listed
@@ -1533,6 +1549,11 @@ enum StapleNutritionDatabase {
             return spiritsShot
         }
         return nil
+    }
+
+    /// "a can of tuna" / "two cans", not the adjective "canned".
+    private static func mentionsWholeCan(_ text: String) -> Bool {
+        text.range(of: #"\bcans?\b"#, options: [.regularExpression, .caseInsensitive]) != nil
     }
 
     /// "Ice" / "ice cubes" — not ice cream, iced coffee, or Italian ice.

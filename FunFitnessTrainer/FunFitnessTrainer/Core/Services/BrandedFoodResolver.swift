@@ -152,12 +152,12 @@ enum BrandedFoodResolver {
         "wine", "coffee", "latte", "banana", "apple", "orange", "broccoli", "tuna", "shrimp",
         "turkey", "pasta", "water", "ice", "breast", "juice", "bean", "salsa", "cheese", "avocado",
         "carrot", "peanut", "almond", "soy", "coconut", "sirloin", "grain", "seed", "fruit",
-        "whole", "skim", "white", "brown",
+        "whole", "skim", "white", "brown", "canned",
     ]
 
     private static let stopWords: Set<String> = [
         "a", "an", "the", "of", "with", "and", "plus", "i", "had", "my", "some", "for", "to", "on",
-        "it", "was", "bowl", "cup", "slice", "serving", "oz", "ounce", "gram", "grams", "ml",
+        "it", "was", "bowl", "cup", "slice", "serving", "size", "can", "tin", "oz", "ounce", "gram", "grams", "ml",
         "about", "just", "only", "fl", "fluid", "large", "small", "medium", "one", "two", "half",
         "grilled", "baked", "roasted", "fried", "raw", "cooked", "fresh", "organic", "plain",
         "leftover", "homemade", "steamed", "boiled", "crispy", "boneless", "skinless", "unsweetened",

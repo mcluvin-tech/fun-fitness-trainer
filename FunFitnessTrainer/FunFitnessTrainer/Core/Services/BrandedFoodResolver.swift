@@ -42,11 +42,39 @@ protocol BrandedFoodCatalog {
 /// Open Food Facts needs no key. A failure on either side returns nothing from that side.
 struct LiveBrandedFoodCatalog: BrandedFoodCatalog {
     func searchBranded(query: String) async -> [BrandedFoodHit] {
-        async let usda = USDAFoodDataService.searchBranded(query: query)
-        async let off = OpenFoodFactsService.searchCandidates(query: query)
-        let usdaHits = await usda
-        let offHits = await off
-        return usdaHits.map { hit in
+        await Self.combiningIndependentResults(
+            usda: { await Self.usdaHits(query) },
+            off: { await Self.offHits(query) }
+        )
+    }
+
+    /// Each side catches its own failure. A 503 or timeout from one catalog cannot cancel the other.
+    static func combiningIndependentResults(
+        usda: () async throws -> [BrandedFoodHit],
+        off: () async throws -> [BrandedFoodHit]
+    ) async -> [BrandedFoodHit] {
+        await withTaskGroup(of: (String, [BrandedFoodHit]).self) { group in
+            group.addTask {
+                do { return ("usda", try await usda()) } catch { return ("usda", []) }
+            }
+            group.addTask {
+                do { return ("off", try await off()) } catch { return ("off", []) }
+            }
+            var usdaHits: [BrandedFoodHit] = []
+            var offHits: [BrandedFoodHit] = []
+            for await (side, hits) in group {
+                if side == "usda" {
+                    usdaHits = hits
+                } else {
+                    offHits = hits
+                }
+            }
+            return usdaHits + offHits
+        }
+    }
+
+    private static func usdaHits(_ query: String) async -> [BrandedFoodHit] {
+        await USDAFoodDataService.searchBranded(query: query).map { hit in
             BrandedFoodHit(
                 name: hit.name,
                 brand: hit.brand,
@@ -55,7 +83,13 @@ struct LiveBrandedFoodCatalog: BrandedFoodCatalog {
                 barcode: hit.barcode,
                 source: .usda
             )
-        } + offHits.map { product in
+        }
+    }
+
+    /// Open Food Facts is capped so a hung 503 cannot hold up USDA hits that already came back.
+    private static func offHits(_ query: String) async -> [BrandedFoodHit] {
+        let products = await productsFromOpenFoodFacts(query: query, within: 2.5)
+        return products.map { product in
             BrandedFoodHit(
                 name: product.name,
                 brand: product.brand,
@@ -64,6 +98,24 @@ struct LiveBrandedFoodCatalog: BrandedFoodCatalog {
                 barcode: product.barcode.isEmpty ? nil : product.barcode,
                 source: .manufacturer
             )
+        }
+    }
+
+    private static func productsFromOpenFoodFacts(
+        query: String,
+        within seconds: Double
+    ) async -> [BarcodeProductResult] {
+        await withTaskGroup(of: [BarcodeProductResult]?.self) { group in
+            group.addTask {
+                await OpenFoodFactsService.searchCandidates(query: query)
+            }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                return nil
+            }
+            let first = await group.next() ?? nil
+            group.cancelAll()
+            return first ?? []
         }
     }
 }
@@ -117,6 +169,34 @@ enum BrandedFoodResolver {
 
     static func restoreLiveCatalogForTests() {
         useCatalogForTests(LiveBrandedFoodCatalog())
+    }
+
+    /// "Catalina, Crunch" is one product. "eggs, toast" stays two foods.
+    static func joiningSpokenBrandPairs(_ text: String) -> String {
+        let pattern = #"\b([\p{L}']{3,})\s*,\s*([\p{L}']{3,})\b"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return text }
+        let ns = text as NSString
+        let matches = regex.matches(in: text, range: NSRange(location: 0, length: ns.length))
+        var result = text
+        for match in matches.reversed() {
+            guard match.numberOfRanges == 3,
+                  let whole = Range(match.range, in: result),
+                  let leftRange = Range(match.range(at: 1), in: result),
+                  let rightRange = Range(match.range(at: 2), in: result) else { continue }
+            let left = String(result[leftRange])
+            let right = String(result[rightRange])
+            guard isBrandLexiconWord(left), isBrandLexiconWord(right) else { continue }
+            let fixedLeft = correctedBrandToken(left.lowercased()) ?? left
+            let fixedRight = correctedBrandToken(right.lowercased()) ?? right
+            result.replaceSubrange(whole, with: "\(fixedLeft) \(fixedRight)")
+        }
+        return result
+    }
+
+    static func isBrandLexiconWord(_ word: String) -> Bool {
+        let lower = word.lowercased()
+        if brandLexicon.contains(lower) { return true }
+        return correctedBrandToken(lower) != nil
     }
 
     static func correctedPhrase(_ text: String) -> String {

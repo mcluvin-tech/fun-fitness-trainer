@@ -171,7 +171,7 @@ enum TrainerService {
                 settings: settings
             )
         } catch {
-            return applyAutoMealLogIfNeeded(
+            return await applyAutoMealLogIfNeeded(
                 offlineResponse(
                     mode: mode,
                     messages: messages,
@@ -183,7 +183,8 @@ enum TrainerService {
                     settings: settings,
                     exerciseCaloriesBurned: exerciseCaloriesBurned
                 ),
-                messages: messages
+                messages: messages,
+                mode: mode
             )
         }
     }
@@ -215,16 +216,20 @@ enum TrainerService {
             return plan
         }
         guard AppConfig.hasBackend else {
-            return offlineResponse(
-                mode: mode,
+            return await applyAutoMealLogIfNeeded(
+                offlineResponse(
+                    mode: mode,
+                    messages: messages,
+                    consumed: consumed,
+                    goal: goal,
+                    remaining: remaining,
+                    phrases: phrases,
+                    weightKg: weightKg,
+                    settings: settings,
+                    exerciseCaloriesBurned: exerciseCaloriesBurned
+                ),
                 messages: messages,
-                consumed: consumed,
-                goal: goal,
-                remaining: remaining,
-                phrases: phrases,
-                weightKg: weightKg,
-                settings: settings,
-                exerciseCaloriesBurned: exerciseCaloriesBurned
+                mode: mode
             )
         }
 
@@ -278,7 +283,7 @@ enum TrainerService {
                 clear_todays_log: true
             )
         }
-        response = applyAutoMealLogIfNeeded(response, messages: messages)
+        response = await applyAutoMealLogIfNeeded(response, messages: messages, mode: mode)
         return response
     }
 
@@ -683,12 +688,22 @@ enum TrainerService {
         return triggers.contains { text.contains($0) }
     }
 
+    /// Typed chat and the mic share this lookup. Speech transcripts may still carry
+    /// a trailing period or a one-letter miss ("Katalina", "Krunch") when they get here.
+    static func resolveLoggedFood(from utterance: String) async -> FoodLookupOutcome {
+        let spoken = FoodItemNaming.normalizedSpeechTranscript(utterance)
+        let source = FoodItemNaming.foodMentionForLogging(from: spoken) ?? spoken
+        return await FoodAnalysisService.resolveFoodLog(from: source)
+    }
+
     /// When Larry omits MEAL_JSON — or re-logs an old meal on confirmation — fix locally.
     /// Also reconciles GPT MEAL_JSON so "3 eggs" never stores 1-egg calories.
+    /// A spoken or typed food is resolved before it is returned, so the saved meal is not the 242 kcal placeholder.
     private static func applyAutoMealLogIfNeeded(
         _ response: TrainerChatResponse,
-        messages: [ChatMessageDTO]
-    ) -> TrainerChatResponse {
+        messages: [ChatMessageDTO],
+        mode: String
+    ) async -> TrainerChatResponse {
         guard let lastUser = messages.last(where: { $0.role == "user" })?.content else { return response }
         let text = lastUser.lowercased()
         if FoodLogCorrection.looksLikeCorrection(lastUser) {
@@ -707,10 +722,8 @@ enum TrainerService {
         // "log that" / "make sure you log that" → always use the latest food mention.
         // The model often re-emits an earlier meal (chicken/chips) instead of Fairlife.
         if looksLikeFoodConfirmation(text), let source = contextFood {
-            let meal = FoodAnalysisService.applyUserStatedMacros(
-                FoodAnalysisService.estimateOffline(from: source),
-                from: lastUser
-            )
+            let outcome = await resolveLoggedFood(from: source)
+            let meal = FoodAnalysisService.applyUserStatedMacros(outcome.meal, from: lastUser)
             return responseByAttachingMeal(response, meal: meal, forceLogBubble: true)
         }
 
@@ -720,7 +733,11 @@ enum TrainerService {
                 FoodAnalysisService.reconcileMealPayload(completed),
                 utterance: lastUser
             )
-            let meal = FoodAnalysisService.applyUserStatedMacros(portioned, from: lastUser)
+            var meal = FoodAnalysisService.applyUserStatedMacros(portioned, from: lastUser)
+            if meal.source != .userProvided, meal.source != .userLabel,
+               let better = await loggedFoodReplacing(meal, utterance: lastUser) {
+                meal = better
+            }
             // #region agent log
             AgentDebugLog.emit(
                 hypothesisId: "E",
@@ -763,15 +780,18 @@ enum TrainerService {
             shouldLog = (looksLikeConfirmedFoodLog(text) || looksLikeCurrentFoodConsumption(text))
                 && !looksLikeHypotheticalFood(text)
         }
-        guard shouldLog else { return response }
+        guard shouldLog else {
+            if let spoken = await spokenBrandMeal(mode: mode, utterance: lastUser, text: text) {
+                return responseByAttachingMeal(response, meal: spoken, forceLogBubble: false)
+            }
+            return response
+        }
 
         let source = contextFood
             ?? FoodItemNaming.foodMentionForLogging(from: lastUser)
             ?? lastUser
-        let meal = FoodAnalysisService.applyUserStatedMacros(
-            FoodAnalysisService.estimateOffline(from: source),
-            from: lastUser
-        )
+        let outcome = await resolveLoggedFood(from: source)
+        let meal = FoodAnalysisService.applyUserStatedMacros(outcome.meal, from: lastUser)
         // #region agent log
         AgentDebugLog.emit(
             hypothesisId: "E",
@@ -788,6 +808,30 @@ enum TrainerService {
         )
         // #endregion
         return responseByAttachingMeal(response, meal: meal, forceLogBubble: false)
+    }
+
+    /// Catalog hit replaces the offline 242 kcal guess. A miss leaves the guess alone.
+    private static func loggedFoodReplacing(_ meal: MealPayload, utterance: String) async -> MealPayload? {
+        let outcome = await resolveLoggedFood(from: utterance)
+        let resolved = FoodAnalysisService.applyUserStatedMacros(outcome.meal, from: utterance)
+        guard outcome.needsConfirmation || FoodAnalysisService.lookupShouldReplace(original: meal, resolved: resolved) else {
+            return nil
+        }
+        return resolved
+    }
+
+    /// The mic often hears only the product name. That still logs, through the same resolver as typed food.
+    private static func spokenBrandMeal(mode: String, utterance: String, text: String) async -> MealPayload? {
+        guard mode == "voice" else { return nil }
+        guard !text.contains("?") else { return nil }
+        guard !looksLikeHypotheticalFood(text), !looksLikeFoodMacroQuery(text), !looksLikeMealSuggestion(text) else {
+            return nil
+        }
+        let source = FoodItemNaming.foodMentionForLogging(from: utterance) ?? utterance
+        guard BrandedFoodResolver.shouldSearchCatalog(source) else { return nil }
+        let outcome = await resolveLoggedFood(from: utterance)
+        guard outcome.meal.isLabelBacked || outcome.needsConfirmation else { return nil }
+        return FoodAnalysisService.applyUserStatedMacros(outcome.meal, from: utterance)
     }
 
     private static func responseByAttachingMeal(

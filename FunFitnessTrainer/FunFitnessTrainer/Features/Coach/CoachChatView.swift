@@ -726,13 +726,18 @@ struct CoachChatView: View {
     private func micTapped() {
         voiceError = nil
         if voice.isRecording {
-            let transcript = voice.stopRecording()
-            guard !transcript.isEmpty else {
-                phase = .idle
-                voiceError = "Didn't catch that. Try again."
-                return
+            withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) {
+                phase = .thinking
             }
-            sendUser(transcript, voiceMode: true)
+            Task {
+                let transcript = await voice.stopRecording()
+                guard !transcript.isEmpty else {
+                    phase = .idle
+                    voiceError = "Didn't catch that. Try again."
+                    return
+                }
+                sendUser(transcript, voiceMode: true)
+            }
         } else {
             showKeyboard = false
             composerFocused = false
@@ -923,7 +928,7 @@ struct CoachChatView: View {
 
         let source = latestFoodLogDescription() ?? payload.name
         Task {
-            let outcome = await FoodAnalysisService.resolveFoodLog(from: source)
+            let outcome = await TrainerService.resolveLoggedFood(from: source)
             // #region agent log
             AgentDebugLog.emit(
                 hypothesisId: "C",

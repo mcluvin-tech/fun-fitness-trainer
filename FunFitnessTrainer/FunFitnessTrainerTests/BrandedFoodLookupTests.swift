@@ -184,6 +184,69 @@ final class BrandedFoodLookupTests: XCTestCase {
         XCTAssertTrue(FoodAnalysisService.lookupShouldReplace(original: guess, resolved: labeled))
         let stillGuessing = MealPayload(name: "Something", calories: 242, proteinG: 8, carbsG: 30, fatG: 10, source: .genericEstimate)
         XCTAssertFalse(FoodAnalysisService.lookupShouldReplace(original: guess, resolved: stillGuessing))
+        let typedByHand = MealPayload(name: "Catalina Crunch", calories: 80, proteinG: 4, carbsG: 10, fatG: 2, source: .userProvided)
+        XCTAssertFalse(FoodAnalysisService.lookupShouldReplace(original: typedByHand, resolved: labeled))
+    }
+
+    /// The mic's formattedString is not the typed spelling. Same resolver, same catalog query.
+    func testSpeechTranscriptVariantsResolveCatalinaCrunch() async {
+        let phrases = [
+            "Catalina crunch",
+            "catalina crunch.",
+            "Katalina Crunch",
+            "Catalina Krunch",
+            "Catlina crunch",
+            "CATALINA CRUNCH!",
+            "Catalina, crunch.",
+        ]
+        for phrase in phrases {
+            catalog.queries.removeAll()
+            BrandedFoodResolver.useCatalogForTests(catalog)
+            let outcome = await TrainerService.resolveLoggedFood(from: phrase)
+            XCTAssertEqual(outcome.meal.calories, 110, accuracy: 1, phrase)
+            XCTAssertEqual(outcome.meal.proteinG, 11, accuracy: 0.5, phrase)
+            XCTAssertTrue(outcome.meal.name.lowercased().contains("cinnamon"), phrase)
+            XCTAssertFalse(outcome.needsConfirmation, phrase)
+            XCTAssertEqual(catalog.queries, ["catalina crunch"], phrase)
+        }
+    }
+
+    func testOpenFoodFactsFailureDoesNotDropUSDAHits() async {
+        let cereal = Self.hit(
+            "Cinnamon Toast Cereal",
+            brand: "Catalina Crunch",
+            calories: 110,
+            protein: 11,
+            carbs: 14,
+            fat: 5,
+            serving: "1/2 cup (36 g)"
+        )
+        let hits = await LiveBrandedFoodCatalog.combiningIndependentResults(
+            usda: { [cereal] },
+            off: { throw URLError(.badServerResponse) }
+        )
+        XCTAssertEqual(hits.count, 1)
+        XCTAssertEqual(hits[0].source, .usda)
+        XCTAssertEqual(hits[0].perServing.calories, 110, accuracy: 1)
+        XCTAssertEqual(hits[0].perServing.proteinG, 11, accuracy: 0.5)
+        let ranked = BrandedFoodResolver.rank(searchText: "catalina crunch", hits: hits)
+        XCTAssertEqual(ranked?.best.perServing.calories ?? 0, 110, accuracy: 1)
+        XCTAssertEqual(ranked?.best.perServing.proteinG ?? 0, 11, accuracy: 0.5)
+    }
+
+    /// Opt-in. Skipped unless RUN_LIVE_FOOD_TESTS=1. Hits the real USDA branded search.
+    func testLiveCatlinaCrunchResolvesAgainstUSDA() async throws {
+        try XCTSkipUnless(
+            ProcessInfo.processInfo.environment["RUN_LIVE_FOOD_TESTS"] == "1",
+            "Set RUN_LIVE_FOOD_TESTS=1 to resolve Catlina crunch against the USDA API"
+        )
+        BrandedFoodResolver.restoreLiveCatalogForTests()
+        let meal = await FoodAnalysisService.resolveFoodLog(from: "Catlina crunch").meal
+        XCTAssertEqual(meal.calories, 110, accuracy: 5)
+        XCTAssertEqual(meal.proteinG, 11, accuracy: 1.5)
+        XCTAssertTrue(meal.name.lowercased().contains("catalina"))
+        XCTAssertTrue(meal.name.lowercased().contains("cinnamon"))
+        XCTAssertFalse(meal.name.lowercased().contains("dressing"))
     }
 
     private static let catalinaDressing = hit(

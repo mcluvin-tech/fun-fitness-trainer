@@ -133,6 +133,23 @@ enum FoodItemNaming {
         return cleaned.isEmpty || cleaned.count < 3 ? nil : cleaned
     }
 
+    /// Speech-to-text `formattedString` capitalizes and often adds a period.
+    /// "catalina crunch." keeps the words. A comma between two brand words ("Catalina, crunch") is one product.
+    static func normalizedSpeechTranscript(_ text: String) -> String {
+        var t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trailing = CharacterSet(charactersIn: ".!,;:…\"“”。")
+        var stripping = true
+        while stripping {
+            stripping = false
+            t = t.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let scalar = t.unicodeScalars.last, trailing.contains(scalar) else { break }
+            t.unicodeScalars.removeLast()
+            stripping = true
+        }
+        t = BrandedFoodResolver.joiningSpokenBrandPairs(t)
+        return collapseWhitespace(t)
+    }
+
     private static func extractClause(from text: String, triggers: [String]) -> String? {
         let lower = text.lowercased()
         var best: (index: String.Index, clause: String)?
@@ -148,7 +165,7 @@ enum FoodItemNaming {
 
     /// Strips greetings / questions but preserves quantities and "plus/and" lists for segmentation.
     static func foodListForEstimation(from text: String) -> String {
-        var t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        var t = normalizedSpeechTranscript(text)
         if let q = t.firstIndex(of: "?") {
             t = String(t[..<q])
         }

@@ -283,6 +283,7 @@ enum FoodAnalysisService {
 
     /// A label-backed or higher-priority lookup should replace the first guess.
     static func lookupShouldReplace(original: MealPayload, resolved: MealPayload) -> Bool {
+        if original.source == .userProvided || original.source == .userLabel { return false }
         if resolved.isLabelBacked || resolved.source.priority < original.source.priority {
             return true
         }

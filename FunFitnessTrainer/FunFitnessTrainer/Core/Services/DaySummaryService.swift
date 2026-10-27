@@ -25,17 +25,17 @@ enum DaySummaryService {
         Calendar.current.startOfDay(for: date)
     }
 
-    static func mealsToday(from meals: [Meal], date: Date = Date()) -> [Meal] {
-        let start = startOfDay(date)
-        let end = Calendar.current.date(byAdding: .day, value: 1, to: start)!
+    static func mealsToday(from meals: [Meal], date: Date = Date(), calendar: Calendar = .current) -> [Meal] {
+        let start = calendar.startOfDay(for: date)
+        guard let end = calendar.date(byAdding: .day, value: 1, to: start) else { return [] }
         return meals
             .filter { $0.loggedAt >= start && $0.loggedAt < end }
             .sorted { $0.loggedAt < $1.loggedAt }
     }
 
-    static func exercisesToday(from exercises: [ExerciseLog], date: Date = Date()) -> [ExerciseLog] {
-        let start = startOfDay(date)
-        let end = Calendar.current.date(byAdding: .day, value: 1, to: start)!
+    static func exercisesToday(from exercises: [ExerciseLog], date: Date = Date(), calendar: Calendar = .current) -> [ExerciseLog] {
+        let start = calendar.startOfDay(for: date)
+        guard let end = calendar.date(byAdding: .day, value: 1, to: start) else { return [] }
         return exercises
             .filter { $0.loggedAt >= start && $0.loggedAt < end }
             .sorted { $0.loggedAt < $1.loggedAt }

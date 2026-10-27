@@ -70,6 +70,7 @@
 		N0T1I2F3I4C5A6T7I8O9N0A1 /* Core/Services/NotificationService.swift in Sources */ = {isa = PBXBuildFile; fileRef = N0T1I2F3I4C5A6T7I8O9N0B1 /* Core/Services/NotificationService.swift */; };
 		F0O1D2P3H4O5T6O7L8O9C0A1 /* Core/Services/FoodPhotoLocalAnalysis.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0O1D2P3H4O5T6O7L8O9C0B1 /* Core/Services/FoodPhotoLocalAnalysis.swift */; };
 		T0E1S2T3B4U5N6D7L8E9F0B1 /* PhotoMacroPipelineTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = T0E1S2T3B4U5N6D7L8E9F0A1 /* PhotoMacroPipelineTests.swift */; };
+		C4L0R1E2A3C4C5U6R7A8C9Y2 /* CalorieAccuracyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C4L0R1E2A3C4C5U6R7A8C9Y1 /* CalorieAccuracyTests.swift */; };
 		A7E1B0010000000000000002 /* Core/Services/LarryNutritionJudge.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7E1B0010000000000000001 /* Core/Services/LarryNutritionJudge.swift */; };
 		A7E1B0020000000000000002 /* Core/Models/LarryEmotion.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7E1B0020000000000000001 /* Core/Models/LarryEmotion.swift */; };
 		A7E1B0030000000000000002 /* Core/Services/LarryQuoteBank.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7E1B0030000000000000001 /* Core/Services/LarryQuoteBank.swift */; };
@@ -152,6 +153,7 @@
 		H0K1A2C3T4I5V6P7R8E9F0B1 /* Core/Services/HealthActivityPreferences.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Core/Services/HealthActivityPreferences.swift; sourceTree = "<group>"; };
 		N0T1I2F3I4C5A6T7I8O9N0B1 /* Core/Services/NotificationService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Core/Services/NotificationService.swift; sourceTree = "<group>"; };
 		T0E1S2T3B4U5N6D7L8E9F0A1 /* PhotoMacroPipelineTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhotoMacroPipelineTests.swift; sourceTree = "<group>"; };
+		C4L0R1E2A3C4C5U6R7A8C9Y1 /* CalorieAccuracyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CalorieAccuracyTests.swift; sourceTree = "<group>"; };
 		A7E1B0010000000000000001 /* Core/Services/LarryNutritionJudge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Core/Services/LarryNutritionJudge.swift; sourceTree = "<group>"; };
 		A7E1B0020000000000000001 /* Core/Models/LarryEmotion.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Core/Models/LarryEmotion.swift; sourceTree = "<group>"; };
 		A7E1B0030000000000000001 /* Core/Services/LarryQuoteBank.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Core/Services/LarryQuoteBank.swift; sourceTree = "<group>"; };
@@ -280,6 +282,7 @@
 			isa = PBXGroup;
 			children = (
 				T0E1S2T3B4U5N6D7L8E9F0A1 /* PhotoMacroPipelineTests.swift */,
+				C4L0R1E2A3C4C5U6R7A8C9Y1 /* CalorieAccuracyTests.swift */,
 				A7E1B0070000000000000001 /* LarryReactionEngineTests.swift */,
 				F1C4A11E0000000000000009 /* FriendChallengeTests.swift */,
 			);
@@ -464,6 +467,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				T0E1S2T3B4U5N6D7L8E9F0B1 /* PhotoMacroPipelineTests.swift in Sources */,
+				C4L0R1E2A3C4C5U6R7A8C9Y2 /* CalorieAccuracyTests.swift in Sources */,
 				A7E1B0070000000000000002 /* LarryReactionEngineTests.swift in Sources */,
 				F1C4A11E000000000000000A /* FriendChallengeTests.swift in Sources */,
 			);

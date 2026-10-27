@@ -2,7 +2,7 @@ import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { corsHeaders, jsonResponse } from "../_shared/cors.ts";
 import { chatCompletion } from "../_shared/openai.ts";
 
-const PROMPT_VERSION = 6;
+const PROMPT_VERSION = 7;
 
 const SYSTEM = `You are looking at a photo of food. Identify what is on the plate and estimate portions. You are NOT the nutrition database — the app will calculate calories and macros from your line items.
 
@@ -42,11 +42,13 @@ If ANY nutrition label, calories line, kcal, or Supplement Facts is visible:
 - 0g protein / carbs / fat is valid when that is what the label shows.
 - Use gram amounts, never Daily Value percentages.
 - Use the serving size printed on the label unless the user hint says they ate more/less.
+- If the label prints kilojoules (kJ), divide by 4.184 and put kilocalories in calories. Never copy a kJ number into calories.
 - Put the product name in items when the package shows one.
 
 If there is no readable label (a plate, bowl, restaurant dish, homemade food):
 - Set label_detected=false.
 - One line_items row per distinct visible food, with quantity and unit.
+- calories, protein_g, carbs_g, and fat_g on a line item are the TOTAL for that row's quantity. Do not copy the whole-meal total onto every row.
 - Meat and fish: estimate ounces or grams; set preparation to cooked or raw when it matters.
 - Rice, grains, yogurt: estimate cups.
 - Include oil, butter, sauce, cheese, or dressing as its OWN line item ONLY when you can see it or the user hint names it.

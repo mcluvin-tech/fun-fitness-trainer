@@ -208,8 +208,8 @@ enum OpenFoodFactsService {
 
     static func parseProduct(_ product: [String: Any], barcode: String) -> BarcodeProductResult? {
         let nutriments = product["nutriments"] as? [String: Any] ?? [:]
-        let servingQuantity = doubleValue(product["serving_quantity"]) ?? 100
-        let perServing = macros(from: nutriments, servingQuantityGrams: servingQuantity)
+        let servingQuantity = resolvedServingAmount(product: product, nutriments: nutriments)
+        let perServing = macros(from: nutriments, product: product, servingAmount: servingQuantity)
 
         guard perServing.calories >= 0 else { return nil }
 
@@ -296,17 +296,49 @@ enum OpenFoodFactsService {
             return servingQuantity > 0 ? servingQuantity : nil
         }
         if let desc = servingDescription?.lowercased() {
-            if desc.contains("ml"), let ml = parseLeadingNumber(in: desc) { return ml }
-            if desc.contains("fl oz") || desc.contains("oz"), let oz = parseLeadingNumber(in: desc) {
-                return oz * 29.5735
+            if let ml = numberBeforeUnit(desc, unit: #"(?:ml|milliliters?|millilitres?)\b"#) {
+                return ml
+            }
+            if desc.contains("fl oz") || desc.contains("fluid"),
+               let oz = numberBeforeUnit(desc, unit: #"(?:fl\.?\s*oz|fluid\s*ounces?)\b"#) {
+                return oz * FoodUnit.mlPerFluidOunce
             }
         }
-        if servingQuantity > 0, servingQuantity < 500 { return servingQuantity }
+        let unit = (nutriments["serving_size_unit"] as? String ?? "").lowercased()
+        if unit.contains("ml"), servingQuantity > 0 { return servingQuantity }
         return nil
     }
 
-    private static func parseLeadingNumber(in text: String) -> Double? {
-        guard let regex = try? NSRegularExpression(pattern: #"(\d+(?:\.\d+)?)"#),
+    /// Grams or milliliters in one label serving. "28 g" wins over a missing quantity, and over a count of 1.
+    private static func resolvedServingAmount(product: [String: Any], nutriments: [String: Any]) -> Double {
+        let described = servingAmount(from: product["serving_size"] as? String)
+        let quantity = doubleValue(product["serving_quantity"])
+        if let described, let quantity {
+            // serving_quantity is sometimes a count ("1" or "12" fl oz) while the label states grams or ml.
+            if quantity <= 32, described > quantity * 3 { return described }
+            return quantity
+        }
+        if let described { return described }
+        if let quantity, quantity > 0 { return quantity }
+        _ = nutriments
+        return 100
+    }
+
+    private static func servingAmount(from servingSize: String?) -> Double? {
+        guard let text = servingSize?.lowercased(), !text.isEmpty else { return nil }
+        if let grams = numberBeforeUnit(text, unit: #"(?:grams?|g)\b"#) { return grams }
+        if let ml = numberBeforeUnit(text, unit: #"(?:ml|milliliters?|millilitres?)\b"#) { return ml }
+        if let oz = numberBeforeUnit(text, unit: #"(?:fl\.?\s*oz|fluid\s*ounces?)\b"#) {
+            return oz * FoodUnit.mlPerFluidOunce
+        }
+        if text.contains("oz"), !text.contains("fl"), let oz = numberBeforeUnit(text, unit: #"(?:ounces?|oz)\b"#) {
+            return oz * FoodUnit.gramsPerOunce
+        }
+        return nil
+    }
+
+    private static func numberBeforeUnit(_ text: String, unit: String) -> Double? {
+        guard let regex = try? NSRegularExpression(pattern: #"(\d+(?:\.\d+)?)\s*"# + unit, options: .caseInsensitive),
               let match = regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)),
               let range = Range(match.range(at: 1), in: text) else { return nil }
         return Double(text[range])
@@ -351,52 +383,103 @@ enum OpenFoodFactsService {
         return "Packaged food"
     }
 
-    private static func macros(from nutriments: [String: Any], servingQuantityGrams: Double) -> MacroTotals {
+    private static func macros(
+        from nutriments: [String: Any],
+        product: [String: Any],
+        servingAmount: Double
+    ) -> MacroTotals {
+        let basis = (
+            (nutriments["nutrition_data_per"] as? String)
+            ?? (product["nutrition_data_per"] as? String)
+            ?? ""
+        ).lowercased()
+        let perServingBasis = basis.contains("serving")
+
         if let serving = servingMacros(from: nutriments) {
             return serving
         }
-        return scaledFrom100g(nutriments: nutriments, servingQuantityGrams: servingQuantityGrams)
+
+        if perServingBasis {
+            let raw = unsuffixedMacros(nutriments)
+            if raw.calories > 0 || raw.proteinG + raw.carbsG + raw.fatG > 0 {
+                return raw
+            }
+        }
+
+        return scaledFrom100g(
+            nutriments: nutriments,
+            servingAmount: servingAmount,
+            includeUnsuffixed: !perServingBasis
+        )
     }
 
     private static func servingMacros(from nutriments: [String: Any]) -> MacroTotals? {
-        // Only trust explicit per-serving keys — bare "energy-kcal" is often per 100g.
-        guard nutriments["energy-kcal_serving"] != nil,
-              let calories = doubleValue(nutriments["energy-kcal_serving"]),
-              calories >= 0 else { return nil }
+        let protein = nutrient(nutriments, keys: ["proteins_serving"])
+        let carbs = nutrient(nutriments, keys: ["carbohydrates_serving"])
+        let fat = nutrient(nutriments, keys: ["fat_serving"])
+        let kcal = doubleValue(nutriments["energy-kcal_serving"])
+        let kj = doubleValue(nutriments["energy-kj_serving"]) ?? doubleValue(nutriments["energy_serving"])
+        guard kcal != nil || kj != nil else { return nil }
 
-        return MacroTotals(
-            calories: calories,
-            proteinG: nutrient(nutriments, keys: ["proteins_serving"]),
-            carbsG: nutrient(nutriments, keys: ["carbohydrates_serving"]),
-            fatG: nutrient(nutriments, keys: ["fat_serving"])
+        let calories = MacroTrackingEngine.normalizedEnergy(
+            reportedCalories: kcal ?? 0,
+            kilojoules: kj,
+            proteinG: protein,
+            carbsG: carbs,
+            fatG: fat
         )
+        // A zero kcal field with real macros is a missing value, not a diet soda.
+        if calories == 0, protein + carbs + fat > 0 { return nil }
+        return MacroTotals(calories: calories, proteinG: protein, carbsG: carbs, fatG: fat)
+    }
+
+    private static func unsuffixedMacros(_ nutriments: [String: Any]) -> MacroTotals {
+        let protein = nutrient(nutriments, keys: ["proteins"])
+        let carbs = nutrient(nutriments, keys: ["carbohydrates"])
+        let fat = nutrient(nutriments, keys: ["fat"])
+        let calories = MacroTrackingEngine.normalizedEnergy(
+            reportedCalories: doubleValue(nutriments["energy-kcal"]) ?? 0,
+            kilojoules: doubleValue(nutriments["energy-kj"]) ?? doubleValue(nutriments["energy"]),
+            proteinG: protein,
+            carbsG: carbs,
+            fatG: fat
+        )
+        return MacroTotals(calories: calories, proteinG: protein, carbsG: carbs, fatG: fat)
     }
 
     private static func scaledFrom100g(
         nutriments: [String: Any],
-        servingQuantityGrams: Double
+        servingAmount: Double,
+        includeUnsuffixed: Bool
     ) -> MacroTotals {
-        let factor = max(servingQuantityGrams, 1) / 100.0
-        let calories = nutrient(nutriments, keys: ["energy-kcal_100g", "energy-kcal"]) * factor
-
-        if calories <= 0 {
-            let kj = nutrient(nutriments, keys: ["energy-kj_100g", "energy-kj"]) * factor
-            if kj > 0 {
-                return MacroTotals(
-                    calories: kj / 4.184,
-                    proteinG: nutrient(nutriments, keys: ["proteins_100g", "proteins"]) * factor,
-                    carbsG: nutrient(nutriments, keys: ["carbohydrates_100g", "carbohydrates"]) * factor,
-                    fatG: nutrient(nutriments, keys: ["fat_100g", "fat"]) * factor
-                )
-            }
+        let factor = max(servingAmount, 1) / 100.0
+        var kcalKeys = ["energy-kcal_100g", "energy-kcal_100ml"]
+        var kjKeys = ["energy-kj_100g", "energy-kj_100ml", "energy_100g", "energy_100ml"]
+        var proteinKeys = ["proteins_100g", "proteins_100ml"]
+        var carbKeys = ["carbohydrates_100g", "carbohydrates_100ml"]
+        var fatKeys = ["fat_100g", "fat_100ml"]
+        if includeUnsuffixed {
+            kcalKeys.append("energy-kcal")
+            kjKeys.append("energy-kj")
+            kjKeys.append("energy")
+            proteinKeys.append("proteins")
+            carbKeys.append("carbohydrates")
+            fatKeys.append("fat")
         }
 
-        return MacroTotals(
-            calories: calories,
-            proteinG: nutrient(nutriments, keys: ["proteins_100g", "proteins"]) * factor,
-            carbsG: nutrient(nutriments, keys: ["carbohydrates_100g", "carbohydrates"]) * factor,
-            fatG: nutrient(nutriments, keys: ["fat_100g", "fat"]) * factor
+        let protein = nutrient(nutriments, keys: proteinKeys) * factor
+        let carbs = nutrient(nutriments, keys: carbKeys) * factor
+        let fat = nutrient(nutriments, keys: fatKeys) * factor
+        let kcal = nutrient(nutriments, keys: kcalKeys) * factor
+        let kj = nutrient(nutriments, keys: kjKeys) * factor
+        let calories = MacroTrackingEngine.normalizedEnergy(
+            reportedCalories: kcal,
+            kilojoules: kj > 0 ? kj : nil,
+            proteinG: protein,
+            carbsG: carbs,
+            fatG: fat
         )
+        return MacroTotals(calories: calories, proteinG: protein, carbsG: carbs, fatG: fat)
     }
 
     private static func nutrient(_ nutriments: [String: Any], keys: [String]) -> Double {
@@ -806,11 +889,7 @@ enum USDAFoodDataService {
                 guard matchesID || matchesName else { continue }
                 if energy, name.contains("from") { continue }
                 if !matchesID, name.contains("saturated") || name.contains("trans") { continue }
-                let raw: Double?
-                if let value = nutrient["value"] as? Double { raw = value }
-                else if let value = nutrient["value"] as? Int { raw = Double(value) }
-                else { raw = nil }
-                guard var value = raw else { continue }
+                guard var value = doubleValue(nutrient["value"]) ?? doubleValue(nutrient["amount"]) else { continue }
                 let unit = (nutrient["unitName"] as? String ?? "").lowercased()
                 if energy, unit.contains("kj") { value /= 4.184 }
                 return value
@@ -818,7 +897,12 @@ enum USDAFoodDataService {
             return 0
         }
 
-        let calories = amount([1008], names: ["energy"], energy: true)
+        let calories = MacroTrackingEngine.normalizedEnergy(
+            reportedCalories: amount([1008], names: ["energy"], energy: true),
+            proteinG: amount([1003], names: ["protein"]),
+            carbsG: amount([1005], names: ["carbohydrate"]),
+            fatG: amount([1004], names: ["total lipid", "fat"])
+        )
         guard calories > 0 else { return nil }
         let description = (food["description"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let brand = ((food["brandOwner"] as? String) ?? (food["brandName"] as? String))?

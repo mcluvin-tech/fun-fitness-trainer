@@ -59,16 +59,16 @@ struct FoodAnalysisResult: Codable {
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        calories = try c.decodeIfPresent(Double.self, forKey: .calories) ?? 0
-        proteinG = try c.decodeIfPresent(Double.self, forKey: .proteinG) ?? 0
-        carbsG = try c.decodeIfPresent(Double.self, forKey: .carbsG) ?? 0
-        fatG = try c.decodeIfPresent(Double.self, forKey: .fatG) ?? 0
+        calories = FlexibleJSONNumber.double(c, .calories)
+        proteinG = FlexibleJSONNumber.double(c, .proteinG)
+        carbsG = FlexibleJSONNumber.double(c, .carbsG)
+        fatG = FlexibleJSONNumber.double(c, .fatG)
         items = try c.decodeIfPresent([String].self, forKey: .items) ?? []
         lineItems = try c.decodeIfPresent([MealLineItem].self, forKey: .lineItems) ?? []
-        if let overall = try c.decodeIfPresent(Double.self, forKey: .overallConfidence) {
+        if let overall = FlexibleJSONNumber.optionalDouble(c, .overallConfidence) {
             confidence = overall
         } else {
-            confidence = try c.decodeIfPresent(Double.self, forKey: .confidence) ?? 0.5
+            confidence = FlexibleJSONNumber.optionalDouble(c, .confidence) ?? 0.5
         }
         assumptions = try c.decodeIfPresent([String].self, forKey: .assumptions) ?? []
         labelDetected = try c.decodeIfPresent(Bool.self, forKey: .labelDetected)
@@ -457,7 +457,7 @@ enum FoodAnalysisService {
             }
         }
 
-        guard portion.amount > 1 else { return 1 }
+        guard abs(portion.amount - 1) > 0.001 else { return 1 }
 
         let serving = (product.servingDescription ?? "").lowercased()
         let productName = product.name.lowercased()
@@ -721,7 +721,39 @@ enum FoodAnalysisService {
         if let repaired = repairedPlantMilkMacros(name: name, storedCalories: calories) {
             return repaired
         }
+        if let repaired = repairedExplodedPortion(
+            name: name,
+            storedCalories: calories,
+            proteinG: proteinG,
+            carbsG: carbsG,
+            fatG: fatG
+        ) {
+            return repaired
+        }
         return MacroTotals(calories: calories, proteinG: proteinG, carbsG: carbsG, fatG: fatG)
+    }
+
+    /// "16 oz milk" used to multiply the per-100 g row by 16. Rewrite only obvious multiples.
+    private static func repairedExplodedPortion(
+        name: String,
+        storedCalories: Double,
+        proteinG: Double,
+        carbsG: Double,
+        fatG: Double
+    ) -> MacroTotals? {
+        guard storedCalories >= 400 else { return nil }
+        let lower = name.lowercased()
+        let hasMeasure = FoodQuantity.parseOunces(in: lower) != nil
+            || FoodQuantity.parseGrams(in: lower) != nil
+            || FoodQuantity.parseMilliliters(in: lower) != nil
+            || lower.contains("cup")
+        guard hasMeasure else { return nil }
+        guard let scaled = StapleNutritionDatabase.scale(for: name), scaled.totals.calories > 0 else { return nil }
+        guard storedCalories / scaled.totals.calories >= 2.5 else { return nil }
+        _ = proteinG
+        _ = carbsG
+        _ = fatG
+        return scaled.totals
     }
 
     /// "Ice" logged as 200×N servings because "5 calories" was parsed as quantity 5.
@@ -926,7 +958,7 @@ enum FoodAnalysisService {
         let name = FoodItemNaming.logLabel(from: segment, quantity: portion.amount)
 
         if sourceLower.contains("sandwich") {
-            return genericItem(name: name, calories: 450, proteinG: 28, carbsG: 40, fatG: 18, quantity: max(portion.amount, 1), confidence: .low)
+            return genericItem(name: name, calories: 450, proteinG: 28, carbsG: 40, fatG: 18, quantity: loggedCount(portion), confidence: .low)
         }
         if let scaled = StapleNutritionDatabase.scale(for: segment) {
             let drinkKeys: Set<String> = [
@@ -957,9 +989,9 @@ enum FoodAnalysisService {
         if sourceLower.contains("salad") {
             let hearty = ["chicken", "tuna", "salmon", "steak", "shrimp", "egg"].contains { sourceLower.contains($0) }
             if hearty {
-                return genericItem(name: name, calories: 420, proteinG: 32, carbsG: 16, fatG: 16, quantity: max(portion.amount, 1), confidence: .low)
+                return genericItem(name: name, calories: 420, proteinG: 32, carbsG: 16, fatG: 16, quantity: loggedCount(portion), confidence: .low)
             }
-            return genericItem(name: name, calories: 150, proteinG: 4, carbsG: 12, fatG: 8, quantity: max(portion.amount, 1), confidence: .low)
+            return genericItem(name: name, calories: 150, proteinG: 4, carbsG: 12, fatG: 8, quantity: loggedCount(portion), confidence: .low)
         }
         if sourceLower.contains("burger") || sourceLower.contains("pizza") || sourceLower.contains("mcdonald") {
             return genericItem(
@@ -968,18 +1000,18 @@ enum FoodAnalysisService {
                 proteinG: 28,
                 carbsG: 55,
                 fatG: 32,
-                quantity: max(portion.amount, 1),
+                quantity: loggedCount(portion),
                 confidence: .low
             )
         }
         if sourceLower.contains("power green") || sourceLower.contains("powder green") {
-            return genericItem(name: name, calories: 450, proteinG: 28, carbsG: 45, fatG: 18, quantity: 1, confidence: .low)
+            return genericItem(name: name, calories: 450, proteinG: 28, carbsG: 45, fatG: 18, quantity: loggedCount(portion), confidence: .low)
         }
         if sourceLower.contains("twix") || sourceLower.contains("candy") || sourceLower.contains("chocolate bar") {
-            return genericItem(name: name, calories: 250, proteinG: 2, carbsG: 34, fatG: 12, quantity: max(portion.amount, 1), confidence: .low)
+            return genericItem(name: name, calories: 250, proteinG: 2, carbsG: 34, fatG: 12, quantity: loggedCount(portion), confidence: .low)
         }
         if isCoffeeDrink(FoodItemNaming.sanitizeSegment(segment).lowercased()) || sourceLower.contains("starbucks") {
-            let drinkQty = portion.unit.isVolume ? 1 : max(portion.amount, 1)
+            let drinkQty = drinkServings(portion)
             let drink = estimateCoffeeDrink(name: name, text: sourceLower, sourceLower: sourceLower, quantity: drinkQty)
             // #region agent log
             AgentDebugLog.emit(
@@ -1030,16 +1062,38 @@ enum FoodAnalysisService {
             let oz = portion.unit == .ounce ? portion.amount : 6
             return genericItem(name: name, calories: 60, proteinG: 7, carbsG: 0, fatG: 3.5, quantity: oz, unit: "oz", confidence: .low)
         }
+        let protein = 8.0
+        let carbs = 30.0
+        let fat = 10.0
         return genericItem(
             name: name,
-            calories: 280,
-            proteinG: 8,
-            carbsG: 30,
-            fatG: 10,
-            quantity: 1,
+            calories: MacroTrackingEngine.caloriesFromMacros(proteinG: protein, carbsG: carbs, fatG: fat),
+            proteinG: protein,
+            carbsG: carbs,
+            fatG: fat,
+            quantity: loggedCount(portion),
             unit: "serving",
             confidence: .low
         )
+    }
+
+    /// Ounces and grams are not a serving count. "8 oz burger" is one burger, not eight.
+    private static func loggedCount(_ portion: FoodPortion) -> Double {
+        guard portion.unit.isCountable else { return 1 }
+        return max(portion.amount, 0.25)
+    }
+
+    private static func drinkServings(_ portion: FoodPortion) -> Double {
+        switch portion.unit {
+        case .fluidOunce:
+            return max(portion.amount / 12, 0.5)
+        case .milliliter:
+            return max(portion.amount / 355, 0.5)
+        case .cup:
+            return max(portion.amount * 8 / 12, 0.5)
+        default:
+            return portion.unit.isCountable ? max(portion.amount, 0.25) : 1
+        }
     }
 
     private static func payload(from scaled: StapleNutritionDatabase.ScaledResult, fallbackName: String, barcode: String?) -> MealPayload {
@@ -1138,7 +1192,7 @@ enum FoodAnalysisService {
         sourceLower: String,
         quantity: Double
     ) -> MealLineItem {
-        let q = max(quantity, 1)
+        let q = max(quantity, 0.25)
         let sugarFree = sourceLower.contains("sugar free") || sourceLower.contains("sugar-free")
             || sourceLower.contains("skinny") || sourceLower.contains("nonfat") || sourceLower.contains("non-fat")
         let fatty = sourceLower.contains("frappuccino") || sourceLower.contains("mocha")
@@ -1158,7 +1212,7 @@ enum FoodAnalysisService {
         return MealLineItem(
             name: name,
             calories: cal * sizeMultiplier * q,
-            proteinG: protein * q,
+            proteinG: protein * sizeMultiplier * q,
             carbsG: carbs * sizeMultiplier * q,
             fatG: fat * sizeMultiplier * q,
             quantity: q,
@@ -1191,6 +1245,16 @@ enum FoodAnalysisService {
                         confidence: MacroTrackingEngine.NutritionConfidence.low.rawValue
                     )
                 }
+        }
+        if lineItemsRepeatedTheMealTotal(lineItems, mealCalories: result.calories) {
+            lineItems = lineItems.map { item in
+                var copy = item
+                copy.calories = 0
+                copy.proteinG = 0
+                copy.carbsG = 0
+                copy.fatG = 0
+                return copy
+            }
         }
         if lineItems.isEmpty {
             lineItems = [
@@ -1246,17 +1310,19 @@ enum FoodAnalysisService {
         isCalories: Bool,
         confidence: MacroTrackingEngine.NutritionConfidence
     ) -> String {
-        if confidence == .high {
-            let rounded = value.rounded()
-            if abs(value - rounded) < 0.05 {
-                return String(Int(rounded))
-            }
-            return String(format: "%.1f", value)
-        }
+        _ = confidence
         if isCalories {
-            return String(Int((value / 10.0).rounded() * 10))
+            return String(MacroTrackingEngine.displayCalories(value))
         }
-        return String(Int(value.rounded()))
+        return String(MacroTrackingEngine.displayGrams(value))
+    }
+
+    /// The model sometimes copies the whole-meal total onto every line item.
+    private static func lineItemsRepeatedTheMealTotal(_ items: [MealLineItem], mealCalories: Double) -> Bool {
+        guard items.count > 1, mealCalories > 50 else { return false }
+        return items.allSatisfy { item in
+            item.calories > 0 && abs(item.calories - mealCalories) / mealCalories < 0.12
+        }
     }
 
     private static func isExactPhotoSource(_ result: FoodAnalysisResult) -> Bool {
@@ -1422,54 +1488,12 @@ enum FoodEstimateGate {
 }
 
 enum AgentDebugLog {
-    private static let sessionId = "978dd6"
-    private static let logPath = "/Users/lukeeidsvold/Social Media Guru/exports/Fun Fitness Trainer/.cursor/debug-978dd6.log"
-    private static let endpoints = [
-        "http://127.0.0.1:7417/ingest/1f1eb15b-5e96-4046-891c-3aaf57988060",
-        "http://192.168.1.39:7417/ingest/1f1eb15b-5e96-4046-891c-3aaf57988060",
-    ]
-
+    /// Leftover local debug session. Meal text must not be posted to a LAN ingest or a Mac path.
     static func emit(hypothesisId: String, location: String, message: String, data: [String: Any] = [:]) {
-        let payload: [String: Any] = [
-            "sessionId": sessionId,
-            "runId": "pre-fix",
-            "hypothesisId": hypothesisId,
-            "location": location,
-            "message": message,
-            "data": data,
-            "timestamp": Int(Date().timeIntervalSince1970 * 1000),
-        ]
-        guard let json = try? JSONSerialization.data(withJSONObject: payload) else { return }
-
-        // Simulator / Mac can write the workspace log directly.
-        if !FileManager.default.fileExists(atPath: logPath) {
-            FileManager.default.createFile(atPath: logPath, contents: nil)
-        }
-        if let handle = FileHandle(forWritingAtPath: logPath) {
-            defer { try? handle.close() }
-            handle.seekToEndOfFile()
-            if var line = String(data: json, encoding: .utf8) {
-                line += "\n"
-                if let bytes = line.data(using: .utf8) {
-                    handle.write(bytes)
-                }
-            }
-        }
-
-        // Physical device reaches the Mac ingest over LAN (NSAllowsLocalNetworking).
-        for endpoint in endpoints {
-            guard let url = URL(string: endpoint) else { continue }
-            var request = URLRequest(url: url)
-            request.httpMethod = "POST"
-            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            request.setValue(sessionId, forHTTPHeaderField: "X-Debug-Session-Id")
-            request.httpBody = json
-            URLSession.shared.dataTask(with: request).resume()
-        }
-
-        #if DEBUG
-        print("[AgentDebugLog] \(hypothesisId) \(location): \(message) \(data)")
-        #endif
+        _ = hypothesisId
+        _ = location
+        _ = message
+        _ = data
     }
 
     static func flush() async {}

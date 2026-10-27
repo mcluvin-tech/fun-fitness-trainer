@@ -11,8 +11,8 @@ enum PackFeedService {
                 PackFeedEntry(
                     memberName: "You",
                     mealName: FoodItemNaming.displayTitle(for: meal.name),
-                    calories: Int(meal.calories),
-                    proteinG: Int(meal.proteinG),
+                    calories: MacroTrackingEngine.displayCalories(meal.calories),
+                    proteinG: MacroTrackingEngine.displayGrams(meal.proteinG),
                     loggedAt: meal.loggedAt,
                     isYou: true
                 )

@@ -337,8 +337,9 @@ struct MealConfirmView: View {
     }
 
     private func save() {
-        guard let c = Double(calories), let p = Double(protein),
-              let cb = Double(carbs), let f = Double(fat) else { return }
+        guard let c = Double(calories), let p = Double(protein) else { return }
+        let cb = Double(carbs) ?? 0
+        let f = Double(fat) ?? 0
 
         let photo = image.jpegDataForFoodAnalysis() ?? image.jpegData(compressionQuality: 0.7)
         let payload: MealPayload

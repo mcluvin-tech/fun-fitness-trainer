@@ -58,11 +58,11 @@ struct MealLineItem: Codable, Equatable {
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         name = try c.decode(String.self, forKey: .name)
-        calories = try c.decodeIfPresent(Double.self, forKey: .calories) ?? 0
-        proteinG = try c.decodeIfPresent(Double.self, forKey: .proteinG) ?? 0
-        carbsG = try c.decodeIfPresent(Double.self, forKey: .carbsG) ?? 0
-        fatG = try c.decodeIfPresent(Double.self, forKey: .fatG) ?? 0
-        quantity = try c.decodeIfPresent(Double.self, forKey: .quantity)
+        calories = FlexibleJSONNumber.double(c, .calories)
+        proteinG = FlexibleJSONNumber.double(c, .proteinG)
+        carbsG = FlexibleJSONNumber.double(c, .carbsG)
+        fatG = FlexibleJSONNumber.double(c, .fatG)
+        quantity = FlexibleJSONNumber.optionalDouble(c, .quantity)
         unit = try c.decodeIfPresent(String.self, forKey: .unit)
         preparationState = try c.decodeIfPresent(String.self, forKey: .preparationState)
             ?? c.decodeIfPresent(String.self, forKey: .preparation)
@@ -167,16 +167,16 @@ struct MealPayload: Codable, Equatable {
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         name = try c.decode(String.self, forKey: .name)
-        calories = try c.decode(Double.self, forKey: .calories)
-        proteinG = try c.decode(Double.self, forKey: .proteinG)
-        carbsG = try c.decode(Double.self, forKey: .carbsG)
-        fatG = try c.decode(Double.self, forKey: .fatG)
+        calories = FlexibleJSONNumber.double(c, .calories)
+        proteinG = FlexibleJSONNumber.double(c, .proteinG)
+        carbsG = FlexibleJSONNumber.double(c, .carbsG)
+        fatG = FlexibleJSONNumber.double(c, .fatG)
         items = try c.decodeIfPresent([String].self, forKey: .items) ?? []
         lineItems = try c.decodeIfPresent([MealLineItem].self, forKey: .lineItems) ?? []
         barcode = nil
         isLabelBacked = false
         assumptions = []
-        quantity = try c.decodeIfPresent(Double.self, forKey: .quantity) ?? 1
+        quantity = FlexibleJSONNumber.optionalDouble(c, .quantity) ?? 1
         unit = try c.decodeIfPresent(String.self, forKey: .unit) ?? "serving"
         preparationState = try c.decodeIfPresent(String.self, forKey: .preparationState)
         brand = try c.decodeIfPresent(String.self, forKey: .brand)
@@ -390,5 +390,35 @@ enum MealLogging {
             meal.proteinG,
             meal.loggedAt
         )])
+    }
+}
+
+/// Photo and chat models sometimes send calories as strings ("150") or integers.
+enum FlexibleJSONNumber {
+    static func double<K: CodingKey>(
+        _ container: KeyedDecodingContainer<K>,
+        _ key: K,
+        default defaultValue: Double = 0
+    ) -> Double {
+        optionalDouble(container, key) ?? defaultValue
+    }
+
+    static func optionalDouble<K: CodingKey>(
+        _ container: KeyedDecodingContainer<K>,
+        _ key: K
+    ) -> Double? {
+        if let value = try? container.decode(Double.self, forKey: key) {
+            return value
+        }
+        if let value = try? container.decode(Int.self, forKey: key) {
+            return Double(value)
+        }
+        if let text = try? container.decode(String.self, forKey: key) {
+            let cleaned = text
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .replacingOccurrences(of: ",", with: "")
+            return Double(cleaned)
+        }
+        return nil
     }
 }

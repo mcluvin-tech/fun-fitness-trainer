@@ -423,11 +423,15 @@ enum GoalCalculator {
             }
             let fatG = (targetCalories * fatPercent / 9).rounded()
             let carbsG = max(50, (targetCalories - proteinG * 4 - fatG * 9) / 4).rounded()
-            return MacroGoalPayload(
-                calories: targetCalories.rounded(),
-                proteinG: proteinG,
-                carbsG: carbsG,
-                fatG: fatG
+            return snapToCalories(
+                MacroGoalPayload(
+                    calories: targetCalories.rounded(),
+                    proteinG: proteinG,
+                    carbsG: carbsG,
+                    fatG: fatG
+                ),
+                minimumFatG: 40,
+                minimumCarbsG: 50
             )
 
         case .keto:
@@ -443,11 +447,15 @@ enum GoalCalculator {
             let fatG = (targetCalories * 0.38 / 9).rounded()
             let carbsG = max(60, ((targetCalories - proteinG * 4 - fatG * 9) / 4).rounded())
             let fittedFat = max(40, ((targetCalories - proteinG * 4 - carbsG * 4) / 9).rounded())
-            return MacroGoalPayload(
-                calories: targetCalories.rounded(),
-                proteinG: proteinG,
-                carbsG: carbsG,
-                fatG: fittedFat
+            return snapToCalories(
+                MacroGoalPayload(
+                    calories: targetCalories.rounded(),
+                    proteinG: proteinG,
+                    carbsG: carbsG,
+                    fatG: fittedFat
+                ),
+                minimumFatG: 40,
+                minimumCarbsG: 60
             )
 
         case .carnivore:
@@ -485,12 +493,59 @@ enum GoalCalculator {
             fat = max(0, (calories - protein * 4 - carbs * 4) / 9)
         }
 
-        return MacroGoalPayload(
-            calories: calories.rounded(),
-            proteinG: protein.rounded(),
-            carbsG: carbs.rounded(),
-            fatG: fat.rounded()
+        return snapToCalories(
+            MacroGoalPayload(
+                calories: calories.rounded(),
+                proteinG: protein.rounded(),
+                carbsG: carbs.rounded(),
+                fatG: fat.rounded()
+            ),
+            minimumFatG: minimumFatG,
+            minimumCarbsG: minimumCarbsG
         )
+    }
+
+    /// 4/4/9 must land on the calorie target. A heavy cut can otherwise keep 1 g/lb protein
+    /// and the carb floor, and the gram targets add up to more calories than the plan.
+    private static func snapToCalories(
+        _ macros: MacroGoalPayload,
+        minimumFatG: Double,
+        minimumCarbsG: Double
+    ) -> MacroGoalPayload {
+        var protein = max(0, macros.proteinG.rounded())
+        var carbs = max(0, macros.carbsG.rounded())
+        var fat = max(0, macros.fatG.rounded())
+        let target = macros.calories.rounded()
+        let minFat = max(0, minimumFatG.rounded())
+        let minCarbs = max(0, minimumCarbsG.rounded())
+
+        func energy() -> Double {
+            protein * 4 + carbs * 4 + fat * 9
+        }
+
+        for _ in 0..<80 {
+            let diff = energy() - target
+            if abs(diff) <= 4 { break }
+            if diff > 0 {
+                if fat > minFat {
+                    fat -= 1
+                } else if carbs > minCarbs {
+                    carbs -= 1
+                } else if protein > 0 {
+                    protein -= 1
+                } else {
+                    break
+                }
+            } else if fat < 250 {
+                fat += 1
+            } else if carbs < 800 {
+                carbs += 1
+            } else {
+                protein += 1
+            }
+        }
+
+        return MacroGoalPayload(calories: target, proteinG: protein, carbsG: carbs, fatG: fat)
     }
 
     private static func coachStyle(for goalType: GoalType, diet: DietStyle) -> CoachStyle {

@@ -117,7 +117,7 @@ struct CoachChatView: View {
 
     private var idlePrompt: String {
         if consumed.calories > 0 {
-            return "\(Int(consumed.calories)) calories. Don't get comfortable. What else did you eat?"
+            return "\(MacroTrackingEngine.displayCalories(consumed.calories)) calories. Don't get comfortable. What else did you eat?"
         }
         return "I'm not here to babysit. What did you eat?"
     }
@@ -287,8 +287,8 @@ struct CoachChatView: View {
             if let payload = goalPayload {
                 let shown = displayedConsumed ?? consumed
                 HStack(spacing: 10) {
-                    Text("\(Int(shown.calories)) / \(Int(payload.calories)) cal")
-                    Text("P \(Int(shown.proteinG))g")
+                    Text("\(MacroTrackingEngine.displayCalories(shown.calories)) / \(MacroTrackingEngine.displayCalories(payload.calories)) cal")
+                    Text("P \(MacroTrackingEngine.displayGrams(shown.proteinG))g")
                     if healthKit.isConnected {
                         Text("\(Int(healthKit.stepsToday).formatted()) steps")
                     }

@@ -104,6 +104,41 @@ enum MacroTrackingEngine {
         return caloriesFromMacros(proteinG: proteinG, carbsG: carbsG, fatG: fatG, alcoholG: alcoholG)
     }
 
+    /// Kilojoules sometimes land in a kcal field (Open Food Facts and European labels).
+    /// Convert only when the number matches the kJ scale against the macro math.
+    static func normalizedEnergy(
+        reportedCalories: Double,
+        kilojoules: Double? = nil,
+        proteinG: Double = 0,
+        carbsG: Double = 0,
+        fatG: Double = 0
+    ) -> Double {
+        let reported = max(reportedCalories, 0)
+        let atwater = caloriesFromMacros(proteinG: proteinG, carbsG: carbsG, fatG: fatG)
+        if let kilojoules, kilojoules > 0 {
+            let sameNumber = reported > 0 && abs(reported - kilojoules) / kilojoules < 0.08
+            let fromKJ = (sameNumber ? reported : kilojoules) / 4.184
+            if reported == 0 {
+                return fromKJ
+            }
+            if sameNumber, atwater >= 20, reported > atwater * 3, abs(fromKJ - atwater) < abs(reported - atwater) {
+                return fromKJ
+            }
+        }
+        if atwater >= 25, reported > atwater * 3.7 {
+            let ratio = reported / atwater
+            if ratio < 4.7 {
+                return reported / 4.184
+            }
+        }
+        return reported
+    }
+
+    /// Scale stored macros when the user changes a serving count. `from` and `to` are the same unit.
+    static func scaledForQuantityChange(_ macros: MacroTotals, from oldQuantity: Double, to newQuantity: Double) -> MacroTotals {
+        scale(macros, by: multiplier(consumed: newQuantity, reference: max(oldQuantity, 0.0001)))
+    }
+
     static func recipeTotals(_ ingredients: [MacroTotals]) -> MacroTotals {
         ingredients.reduce(MacroTotals(), +)
     }

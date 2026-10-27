@@ -451,8 +451,8 @@ enum FoodPhotoLocalAnalysis {
         let joined = cleaned.joined(separator: "\n")
         guard looksLikeNutritionLabelText(joined) else { return nil }
 
-        guard let calories = calorieValue(in: cleaned, joined: joined),
-              calories >= 0, calories < 5000 else { return nil }
+        guard let rawCalories = calorieValue(in: cleaned, joined: joined),
+              rawCalories >= 0, rawCalories < 5000 else { return nil }
 
         let protein = nutrientValue(
             near: ["protein", "pretein"],
@@ -491,6 +491,13 @@ enum FoodPhotoLocalAnalysis {
 
         // Diet drinks / extracts: 0–40 kcal with 0g macros is valid.
         // A 200+ kcal "label" with no macros is almost always a bad OCR read.
+        let calories = MacroTrackingEngine.normalizedEnergy(
+            reportedCalories: rawCalories,
+            proteinG: protein,
+            carbsG: carbs,
+            fatG: fat
+        )
+
         if protein + carbs + fat == 0 && calories > 40 {
             return nil
         }
@@ -552,6 +559,8 @@ enum FoodPhotoLocalAnalysis {
             || lower.contains("ralories")
             || lower.contains("alories")
             || lower.contains("kcal")
+            || lower.contains("kilojoule")
+            || lower.contains(" kj")
             || (lower.contains("protein") && (lower.contains("carbohydrate") || lower.contains("total carb")))
             || (lower.contains("pretein") && lower.contains("carbohydrate"))
     }
@@ -567,6 +576,13 @@ enum FoodPhotoLocalAnalysis {
         ]
         if let matched = firstMatch(in: joined, patterns: patterns) {
             return matched
+        }
+        let kilojoulePatterns = [
+            #"(\d+(?:\.\d+)?)\s*k\s*j\b"#,
+            #"kilojoules?\s*[:\.]?\s*(\d+(?:\.\d+)?)"#,
+        ]
+        if let kilojoules = firstMatch(in: joined, patterns: kilojoulePatterns) {
+            return kilojoules / 4.184
         }
         return nutrientValue(
             near: ["calories", "calorles", "ralories", "alories", "calorie", "kcal"],

@@ -34,9 +34,9 @@ struct TrainerChatResponse: Codable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         reply = try c.decode(String.self, forKey: .reply)
         replies = try c.decodeIfPresent([String].self, forKey: .replies)
-        suggested_goal = try c.decodeIfPresent(MacroGoalPayload.self, forKey: .suggested_goal)
-        suggested_meal = try c.decodeIfPresent(MealPayload.self, forKey: .suggested_meal)
-        suggested_exercise = try c.decodeIfPresent(ExercisePayload.self, forKey: .suggested_exercise)
+        suggested_goal = try? c.decode(MacroGoalPayload.self, forKey: .suggested_goal)
+        suggested_meal = try? c.decode(MealPayload.self, forKey: .suggested_meal)
+        suggested_exercise = try? c.decode(ExercisePayload.self, forKey: .suggested_exercise)
         clear_todays_log = try c.decodeIfPresent(Bool.self, forKey: .clear_todays_log)
     }
 
@@ -467,7 +467,7 @@ enum TrainerService {
 
         if text.contains("deficit") || text.contains("cut") || text.contains("lose weight") || text.contains("fat loss") {
             if let goal {
-                return "Fat loss is a calorie deficit plus high protein. Your plan is ~\(Int(goal.calories)) cal and \(Int(goal.proteinG))g protein. Stay under that without crashing below the floor. Patience beats crash diets."
+                return "Fat loss is a calorie deficit plus high protein. Your plan is ~\(MacroTrackingEngine.displayCalories(goal.calories)) cal and \(MacroTrackingEngine.displayGrams(goal.proteinG))g protein. Stay under that without crashing below the floor. Patience beats crash diets."
             }
             return "Fat loss = consistent deficit + high protein + lifting. Crash cuts make you a little bitch on the scale next week."
         }
@@ -477,11 +477,11 @@ enum TrainerService {
         }
 
         if let remaining, let goal {
-            return "Fitness isn't complicated: hit ~\(Int(goal.proteinG))g protein, land near ~\(Int(goal.calories)) cal, train. You've got ~\(Int(remaining.calories)) cal and \(Int(remaining.proteinG))g protein left today. Ask how I set your calories if you want the math."
+            return "Fitness isn't complicated: hit ~\(MacroTrackingEngine.displayGrams(goal.proteinG))g protein, land near ~\(MacroTrackingEngine.displayCalories(goal.calories)) cal, train. You've got ~\(MacroTrackingEngine.displayCalories(remaining.calories)) cal and \(MacroTrackingEngine.displayGrams(remaining.proteinG))g protein left today. Ask how I set your calories if you want the math."
         }
 
         if let goal {
-            return "Plan today: ~\(Int(goal.calories)) cal, \(Int(goal.proteinG))g protein. Ask how I chose those numbers for your weight if you want the formula. Mifflin St Jeor, not fairy dust."
+            return "Plan today: ~\(MacroTrackingEngine.displayCalories(goal.calories)) cal, \(MacroTrackingEngine.displayGrams(goal.proteinG))g protein. Ask how I chose those numbers for your weight if you want the formula. Mifflin St Jeor, not fairy dust."
         }
 
         return "Ask me how I set your calories, protein targets, cutting vs building, or training. I'll give you the math, not motivational posters."
@@ -927,7 +927,7 @@ enum TrainerService {
         }
         let sourceNote = meal.isLabelBacked ? " (Open Food Facts)" : ""
         if entries.count > 1 {
-            let summary = entries.map { "\($0.name), about \(Int($0.calories)) calories" }.joined(separator: ". ")
+            let summary = entries.map { "\($0.name), about \(MacroTrackingEngine.displayCalories($0.calories)) calories" }.joined(separator: ". ")
             return "Logged \(entries.count) items\(sourceNote), baby. \(summary). Macros don't lie!"
         }
         return spokenNutritionReply(for: meal, logged: true, sourceNote: sourceNote)
@@ -958,9 +958,9 @@ enum TrainerService {
         goal: MacroGoalPayload?
     ) -> [String] {
         let entry = estimate.entriesForLogging().first ?? estimate
-        let cal = Int(entry.calories)
-        let protein = Int(entry.proteinG)
-        let fat = Int(entry.fatG)
+        let cal = MacroTrackingEngine.displayCalories(entry.calories)
+        let protein = MacroTrackingEngine.displayGrams(entry.proteinG)
+        let fat = MacroTrackingEngine.displayGrams(entry.fatG)
         let lower = utterance.lowercased()
         let hour = Calendar.current.component(.hour, from: Date())
         let eatingClean = goal.map { hasEatenCleanToday(consumed: consumed, goal: $0, hour: hour) } ?? false
@@ -968,10 +968,10 @@ enum TrainerService {
         var message: String
         if FoodItemNaming.isBeverage(lower) {
             let roast = liquidCaloriesRoast(for: lower, eatingClean: eatingClean)
-            message = "About \(cal) calories, \(protein) grams of protein, \(Int(entry.carbsG.rounded())) grams of carbs, and \(fat) grams of fat. \(roast)"
+            message = "About \(cal) calories, \(protein) grams of protein, \(MacroTrackingEngine.displayGrams(entry.carbsG)) grams of carbs, and \(fat) grams of fat. \(roast)"
         } else if isJunkFood(lower) {
             let roast = junkFoodRoast(eatingClean: eatingClean, utterance: lower)
-            message = "About \(cal) calories, \(protein) grams of protein, \(Int(entry.carbsG)) grams of carbs, \(fat) grams of fat. \(roast)"
+            message = "About \(cal) calories, \(protein) grams of protein, \(MacroTrackingEngine.displayGrams(entry.carbsG)) grams of carbs, \(fat) grams of fat. \(roast)"
         } else if protein >= 20 {
             message = "About \(cal) calories, \(protein) grams of protein, \(fat) grams of fat. Real food. I suppose that's acceptable."
         } else {
@@ -979,7 +979,7 @@ enum TrainerService {
         }
 
         if let remaining {
-            let afterCal = Int(remaining.calories - entry.calories)
+            let afterCal = MacroTrackingEngine.displayCalories(remaining.calories - entry.calories)
             if afterCal >= 0 {
                 message += " You'd still have about \(afterCal) calories left after."
             } else {
@@ -1024,10 +1024,10 @@ enum TrainerService {
         goal: MacroGoalPayload?
     ) -> [String] {
         let entry = estimate.entriesForLogging().first ?? estimate
-        let cal = Int(entry.calories)
-        let protein = Int(entry.proteinG)
-        let carbs = Int(entry.carbsG)
-        let fat = Int(entry.fatG)
+        let cal = MacroTrackingEngine.displayCalories(entry.calories)
+        let protein = MacroTrackingEngine.displayGrams(entry.proteinG)
+        let carbs = MacroTrackingEngine.displayGrams(entry.carbsG)
+        let fat = MacroTrackingEngine.displayGrams(entry.fatG)
         let lower = utterance.lowercased()
         let hour = Calendar.current.component(.hour, from: Date())
         let eatingClean = goal.map { hasEatenCleanToday(consumed: consumed, goal: $0, hour: hour) } ?? false
@@ -1035,7 +1035,7 @@ enum TrainerService {
         var message = "A \(entry.name) runs about ~\(cal) cal, \(protein)g protein, \(carbs)g carbs, \(fat)g fat."
 
         if let remaining {
-            let afterCal = Int(remaining.calories - entry.calories)
+            let afterCal = MacroTrackingEngine.displayCalories(remaining.calories - entry.calories)
             if afterCal >= 0 {
                 message += " That'd leave you ~\(afterCal) cal for the rest of today."
             } else {
@@ -1318,7 +1318,7 @@ enum TrainerService {
             if (text.contains("macro") || text.contains("protein") || text.contains("calorie"))
                 && !looksLikeFoodMacroQuery(text) && !looksLikeHypotheticalFood(text) {
                 if let goal {
-                    return "Alright. Macros don't lie. People do. Plan today is about \(Int(goal.calories)) calories and \(Int(goal.proteinG)) grams of protein. You've logged \(Int(consumed.calories)) so far. Let's stop being a little bitch and start counting!"
+                    return "Alright. Macros don't lie. People do. Plan today is about \(MacroTrackingEngine.displayCalories(goal.calories)) calories and \(MacroTrackingEngine.displayGrams(goal.proteinG)) grams of protein. You've logged \(MacroTrackingEngine.displayCalories(consumed.calories)) so far. Let's stop being a little bitch and start counting!"
                 }
             }
             if text.contains("eat") || text.contains("food") || text.contains("hungry") {
@@ -1335,14 +1335,14 @@ enum TrainerService {
 
         if mode == "voice" {
             if let goal {
-                return "Larry here, offline. Fact one: target ~\(Int(goal.calories)) calories and \(Int(goal.proteinG)) grams protein today. Fact two: you've logged \(Int(consumed.calories)) calories and \(Int(consumed.proteinG)) grams protein so far. Tap the mic and keep talking, baby."
+                return "Larry here, offline. Fact one: target ~\(MacroTrackingEngine.displayCalories(goal.calories)) calories and \(MacroTrackingEngine.displayGrams(goal.proteinG)) grams protein today. Fact two: you've logged \(MacroTrackingEngine.displayCalories(consumed.calories)) calories and \(MacroTrackingEngine.displayGrams(consumed.proteinG)) grams protein so far. Tap the mic and keep talking, baby."
             }
             return "Larry McQuade, offline. Log a meal so I can hit you with real macro numbers."
         }
 
         if mode == "morning" || mode == "chat" {
             if let goal {
-                return "What's up! Larry McQuade here, offline, but I'm still watching. Targets today: about \(Int(goal.calories)) calories and \(Int(goal.proteinG)) grams of protein. What do you need?"
+                return "What's up! Larry McQuade here, offline, but I'm still watching. Targets today: about \(MacroTrackingEngine.displayCalories(goal.calories)) calories and \(MacroTrackingEngine.displayGrams(goal.proteinG)) grams of protein. What do you need?"
             }
             return LarryMcQuade.tagline + " What's on your mind?"
         }

@@ -35,7 +35,8 @@ struct ManualMealEntryView: View {
     }
 
     private func save() {
-        guard let c = Double(calories), let p = Double(protein) else { return }
+        guard let c = Double(calories) else { return }
+        let p = Double(protein) ?? 0
         let cb = Double(carbs) ?? 0
         let f = Double(fat) ?? 0
         let payload = MealPayload(
@@ -61,6 +62,8 @@ struct MealEditView: View {
     @Environment(\.modelContext) private var context
     @Bindable var meal: Meal
     @Query private var settingsList: [UserSettings]
+    @State private var servingCount: Double = 1
+    @State private var appliedServingCount: Double?
 
     private var displayGoal: MacroGoalPayload? {
         DaySummaryService.foodTarget(from: settingsList.first)
@@ -108,6 +111,9 @@ struct MealEditView: View {
         .preferredColorScheme(.dark)
         .onAppear {
             normalizeStoredName()
+            let start = max(meal.quantity ?? 1, 0.25)
+            appliedServingCount = start
+            servingCount = start
         }
         .onDisappear {
             normalizeStoredName()
@@ -115,11 +121,26 @@ struct MealEditView: View {
         }
     }
 
+    private var servingCountText: String {
+        servingCount == floor(servingCount) ? String(Int(servingCount)) : String(format: "%g", servingCount)
+    }
+
     private func normalizeStoredName() {
         let cleaned = FoodItemNaming.canonicalName(for: meal.name)
         if cleaned != meal.name {
             meal.name = cleaned
         }
+    }
+
+    private func applyServingChange(to newValue: Double) {
+        guard let previous = appliedServingCount, abs(previous - newValue) > 0.001 else { return }
+        let scaled = MacroTrackingEngine.scaledForQuantityChange(mealTotals, from: previous, to: newValue)
+        meal.calories = scaled.calories
+        meal.proteinG = scaled.proteinG
+        meal.carbsG = scaled.carbsG
+        meal.fatG = scaled.fatG
+        meal.quantity = newValue
+        appliedServingCount = newValue
     }
 
     private var nameCard: some View {
@@ -135,6 +156,15 @@ struct MealEditView: View {
                     .font(.title3.weight(.semibold))
                     .foregroundStyle(BrandTheme.homePrimaryText)
                     .tint(BrandTheme.magenta)
+
+                Stepper(value: $servingCount, in: 0.25...20, step: 0.25) {
+                    Text("Servings \(servingCountText)")
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(BrandTheme.homePrimaryText)
+                }
+                .onChange(of: servingCount) { _, newValue in
+                    applyServingChange(to: newValue)
+                }
 
                 HStack(spacing: 8) {
                     if meal.confidenceKind == .high {

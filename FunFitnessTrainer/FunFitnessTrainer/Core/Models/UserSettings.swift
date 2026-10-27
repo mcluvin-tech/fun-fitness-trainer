@@ -169,7 +169,14 @@ final class UserSettings {
     }
 
     var activity: ActivityLevel {
-        get { ActivityLevel(rawValue: activityRaw) ?? .moderate }
+        get {
+            if let exact = ActivityLevel(rawValue: activityRaw) {
+                return exact
+            }
+            return ActivityLevel.allCases.min {
+                abs($0.rawValue - activityRaw) < abs($1.rawValue - activityRaw)
+            } ?? .moderate
+        }
         set { activityRaw = newValue.rawValue }
     }
 

@@ -588,8 +588,8 @@ final class PhotoMacroPipelineTests: XCTestCase {
             ]
         )
         // #endregion
-        XCTAssertEqual(entry?.calories ?? 0, 200, "Offline placeholder stays 200 until lookup")
-        XCTAssertEqual(entry?.proteinG ?? 0, 10)
+        XCTAssertEqual(entry?.calories ?? 0, 242, "Offline placeholder is Atwater of 8/30/10 until USDA lookup")
+        XCTAssertEqual(entry?.proteinG ?? 0, 8)
         XCTAssertEqual(resolved.source, .usda, "Raw honey should come from USDA, not the 200/10 placeholder")
         XCTAssertLessThan(resolved.proteinG, 1, "Honey is not a protein food")
         XCTAssertGreaterThan(resolved.calories, 50)

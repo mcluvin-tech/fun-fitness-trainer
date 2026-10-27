@@ -809,10 +809,18 @@ struct DashboardView: View {
                 carbsG: meal.carbsG,
                 fatG: meal.fatG
             )
-            let looksLikeQuantityBug =
-                (cleaned.lowercased().contains("milk") && meal.calories >= 400)
-                || (StapleNutritionDatabase.looksLikePlainIce(cleaned) && meal.calories >= 20)
-            if looksLikeQuantityBug, abs(repaired.calories - meal.calories) > 1 {
+            let protectedSources: Set<String> = [
+                MacroTrackingEngine.NutritionSource.userLabel.rawValue,
+                MacroTrackingEngine.NutritionSource.userProvided.rawValue,
+                MacroTrackingEngine.NutritionSource.manufacturer.rawValue,
+                MacroTrackingEngine.NutritionSource.restaurant.rawValue,
+            ]
+            let labelBacked = meal.barcode != nil || protectedSources.contains(meal.nutritionSource ?? "")
+            let macrosChanged = abs(repaired.calories - meal.calories) > 1
+                || abs(repaired.proteinG - meal.proteinG) > 0.5
+                || abs(repaired.carbsG - meal.carbsG) > 0.5
+                || abs(repaired.fatG - meal.fatG) > 0.5
+            if !labelBacked, macrosChanged {
                 meal.calories = repaired.calories
                 meal.proteinG = repaired.proteinG
                 meal.carbsG = repaired.carbsG

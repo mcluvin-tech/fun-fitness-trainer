@@ -160,7 +160,8 @@ enum StapleNutritionDatabase {
         confidence: .medium,
         barcode: nil,
         notes: "USDA chicken breast, cooked, skinless, per 100g",
-        defaultLoggedPortion: FoodPortion(amount: 6, unit: .ounce, preparation: .cooked)
+        defaultLoggedPortion: FoodPortion(amount: 6, unit: .ounce, preparation: .cooked),
+        gramsPerCup: 140
     )
 
     static let chickenBreastRaw = Entry(
@@ -316,7 +317,8 @@ enum StapleNutritionDatabase {
         confidence: .medium,
         barcode: nil,
         notes: "USDA butter, 1 tbsp (14g)",
-        defaultLoggedPortion: FoodPortion(amount: 1, unit: .tablespoon, preparation: .unknown)
+        defaultLoggedPortion: FoodPortion(amount: 1, unit: .tablespoon, preparation: .unknown),
+        gramsPerTablespoon: 14.2
     )
 
     static let oliveOilTbsp = Entry(
@@ -336,7 +338,8 @@ enum StapleNutritionDatabase {
         confidence: .medium,
         barcode: nil,
         notes: "USDA olive oil, 1 tbsp",
-        defaultLoggedPortion: FoodPortion(amount: 1, unit: .tablespoon, preparation: .unknown)
+        defaultLoggedPortion: FoodPortion(amount: 1, unit: .tablespoon, preparation: .unknown),
+        gramsPerTablespoon: 13.5
     )
 
     static let peanutButterTbsp = Entry(
@@ -355,7 +358,8 @@ enum StapleNutritionDatabase {
         source: .usda,
         confidence: .medium,
         barcode: nil,
-        notes: "USDA peanut butter, 1 tbsp"
+        notes: "USDA peanut butter, 1 tbsp",
+        gramsPerTablespoon: 16
     )
 
     static let almondButterTbsp = Entry(
@@ -374,7 +378,8 @@ enum StapleNutritionDatabase {
         source: .usda,
         confidence: .medium,
         barcode: nil,
-        notes: "USDA almond butter, 1 tbsp"
+        notes: "USDA almond butter, 1 tbsp",
+        gramsPerTablespoon: 16
     )
 
     static let avocadoHalf = Entry(
@@ -469,7 +474,8 @@ enum StapleNutritionDatabase {
         source: .usda,
         confidence: .medium,
         barcode: nil,
-        notes: "Nonfat Greek yogurt, 1 cup"
+        notes: "Nonfat Greek yogurt, 1 cup (about 170 g)",
+        gramsPerCup: 170
     )
 
     static let riceCookedCup = Entry(
@@ -1198,20 +1204,71 @@ enum StapleNutritionDatabase {
     }
 
     /// Cup and tablespoon weights belong to the food. 1 cup spinach ≠ 1 cup rice.
+    /// Fluid ounces of milk must not be treated as a count of 100 g servings.
     private static func foodSpecificFactor(entry: Entry, portion: FoodPortion) -> Double {
-        if entry.referenceUnit == .gram {
-            if portion.unit == .cup, let grams = entry.gramsPerCup, grams > 0 {
-                return MacroTrackingEngine.multiplier(consumed: grams * portion.amount, reference: entry.referenceQuantity)
-            }
-            if portion.unit == .tablespoon, let grams = entry.gramsPerTablespoon, grams > 0 {
-                return MacroTrackingEngine.multiplier(consumed: grams * portion.amount, reference: entry.referenceQuantity)
-            }
+        if let consumedGrams = gramsConsumed(entry: entry, portion: portion),
+           let referenceGrams = gramsInOneReferenceUnit(entry),
+           referenceGrams > 0 {
+            let units = consumedGrams / referenceGrams
+            return MacroTrackingEngine.multiplier(consumed: units, reference: entry.referenceQuantity)
         }
         return FoodQuantity.multiplier(
             consumed: portion,
             referenceQuantity: entry.referenceQuantity,
             referenceUnit: entry.referenceUnit
         )
+    }
+
+    /// Weight of what the user said, using this food's own cup/tablespoon weight when we have one.
+    private static func gramsConsumed(entry: Entry, portion: FoodPortion) -> Double? {
+        if let grams = portion.unit.toGrams(portion.amount) {
+            return grams
+        }
+        guard portion.unit.isVolume, let ml = portion.unit.toMilliliters(portion.amount) else {
+            return nil
+        }
+        if portion.unit == .fluidOunce, let perCup = entry.gramsPerCup, perCup > 0 {
+            // 8 fl oz is one US cup, even though a metric cup is 240 ml.
+            return perCup * (portion.amount / 8)
+        }
+        if let perCup = entry.gramsPerCup, perCup > 0 {
+            return perCup * (ml / FoodUnit.mlPerCup)
+        }
+        if let perTablespoon = entry.gramsPerTablespoon, perTablespoon > 0,
+           portion.unit == .tablespoon || portion.unit == .teaspoon {
+            return perTablespoon * (ml / FoodUnit.mlPerTablespoon)
+        }
+        if looksLikeLiquid(entry) {
+            return ml
+        }
+        return nil
+    }
+
+    private static func gramsInOneReferenceUnit(_ entry: Entry) -> Double? {
+        switch entry.referenceUnit {
+        case .gram:
+            return 1
+        case .ounce:
+            return FoodUnit.gramsPerOunce
+        case .cup:
+            return entry.gramsPerCup
+        case .tablespoon:
+            return entry.gramsPerTablespoon ?? (looksLikeLiquid(entry) ? FoodUnit.mlPerTablespoon : nil)
+        case .teaspoon:
+            return (entry.gramsPerTablespoon ?? FoodUnit.mlPerTablespoon) / 3
+        case .fluidOunce:
+            return looksLikeLiquid(entry) ? FoodUnit.mlPerFluidOunce : nil
+        case .milliliter:
+            return 1
+        default:
+            return nil
+        }
+    }
+
+    private static func looksLikeLiquid(_ entry: Entry) -> Bool {
+        let haystack = (entry.key + " " + entry.displayName + " " + entry.aliases.joined(separator: " ")).lowercased()
+        return haystack.contains("milk") || haystack.contains("juice") || haystack.contains("beer")
+            || haystack.contains("wine") || haystack.contains("soda") || haystack.contains("water")
     }
 
     private static func confidenceScore(

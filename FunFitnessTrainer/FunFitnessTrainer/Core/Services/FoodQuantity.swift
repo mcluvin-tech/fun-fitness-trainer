@@ -131,22 +131,22 @@ enum FoodQuantity {
             return FoodPortion(amount: oz, unit: .ounce, preparation: prep)
         }
         if quantityText.contains("tbsp") || quantityText.contains("tablespoon") {
-            return FoodPortion(amount: number ?? 1, unit: .tablespoon, preparation: prep)
+            return FoodPortion(amount: amountForUnit(#"(?:tbsp|tablespoons?)\b"#, in: quantityText, fallback: number), unit: .tablespoon, preparation: prep)
         }
         if quantityText.contains("tsp") || quantityText.contains("teaspoon") {
-            return FoodPortion(amount: number ?? 1, unit: .teaspoon, preparation: prep)
+            return FoodPortion(amount: amountForUnit(#"(?:tsp|teaspoons?)\b"#, in: quantityText, fallback: number), unit: .teaspoon, preparation: prep)
         }
         if quantityText.contains("cup") {
-            return FoodPortion(amount: number ?? 1, unit: .cup, preparation: prep)
+            return FoodPortion(amount: amountForUnit(#"cups?\b"#, in: quantityText, fallback: number), unit: .cup, preparation: prep)
         }
         if quantityText.contains("slice") {
-            return FoodPortion(amount: number ?? 1, unit: .slice, preparation: prep)
+            return FoodPortion(amount: amountForUnit(#"slices?\b"#, in: quantityText, fallback: number), unit: .slice, preparation: prep)
         }
         if quantityText.contains("piece") || quantityText.contains("pieces") {
-            return FoodPortion(amount: number ?? 1, unit: .piece, preparation: prep)
+            return FoodPortion(amount: amountForUnit(#"pieces?\b"#, in: quantityText, fallback: number), unit: .piece, preparation: prep)
         }
         if quantityText.contains("serving") {
-            return FoodPortion(amount: number ?? 1, unit: .serving, preparation: prep)
+            return FoodPortion(amount: amountForUnit(#"servings?\b"#, in: quantityText, fallback: number), unit: .serving, preparation: prep)
         }
 
         return FoodPortion(amount: number ?? 1, unit: .count, preparation: prep)
@@ -234,7 +234,8 @@ enum FoodQuantity {
         if consumed.unit.isCountable || referenceUnit.isCountable {
             return MacroTrackingEngine.multiplier(consumed: consumed.amount, reference: max(referenceQuantity, 1))
         }
-        return max(consumed.amount, 1)
+        // Incompatible units (100 g vs 1 cup) must not treat the raw number as a serving count.
+        return 1
     }
 
     static func looksLikeBeverage(_ text: String) -> Bool {
@@ -274,12 +275,22 @@ enum FoodQuantity {
         parseMeasurement(in: text, pattern: #"(\d+(?:\.\d+)?)\s*(?:millilitres?|milliliters?|ml)\b"#)
     }
 
+    /// A count only when the number starts the phrase ("3 eggs"), not a name like "21 Whole Grains".
     static func leadingNumber(in text: String) -> Double? {
-        let pattern = #"(\d+(?:\.\d+)?)"#
+        let pattern = #"(?i)^\s*(?:about|around|approximately|roughly)?\s*(\d+(?:\.\d+)?)\b"#
         guard let regex = try? NSRegularExpression(pattern: pattern),
               let match = regex.firstMatch(in: text, range: NSRange(text.startIndex..<text.endIndex, in: text)),
               let range = Range(match.range(at: 1), in: text) else { return nil }
         return Double(text[range])
+    }
+
+    /// "2 slices of Dave's 21" is 2, not 21.
+    private static func amountForUnit(_ unitPattern: String, in text: String, fallback: Double?) -> Double {
+        let pattern = #"(\d+(?:\.\d+)?)\s*"# + unitPattern
+        if let attached = parseMeasurement(in: text, pattern: pattern) {
+            return attached
+        }
+        return fallback ?? 1
     }
 
     static func wordNumber(in text: String) -> Double? {

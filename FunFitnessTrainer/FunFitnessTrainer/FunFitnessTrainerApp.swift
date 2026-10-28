@@ -54,6 +54,10 @@ final class AppState: ObservableObject {
     @Published var showChallengeAccept = false
     /// Main tabs switch to Today after a challenge is accepted.
     @Published var focusTodayTab = false
+    /// Bumped when the center Larry button should open the mic, even mid-reply.
+    @Published var larryListenNonce = 0
+    /// Shown on the center button so listening, logging, and speaking look different.
+    @Published var voicePhase: VoiceTurnPhase = .idle
 
     func presentLarryReaction(_ snapshot: LarryReactionSnapshot, afterSheetDismiss: Bool = true) {
         suppressNextLogCelebration = true

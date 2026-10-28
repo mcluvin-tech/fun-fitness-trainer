@@ -1,15 +1,80 @@
 import AVFoundation
 import Speech
 
-/// Speech-to-text for Larry chat (replies are text-only, no TTS).
+/// Where a voice log is. Listening can start from any other phase, including while the last reply is up.
+enum VoiceTurnPhase: String, Equatable, Sendable {
+    case idle
+    case listening
+    case processing
+    case speaking
+}
+
+/// Pure transitions for back-to-back voice logs. Hardware is not involved, so tests can drive it.
+struct VoiceTurnMachine: Equatable, Sendable {
+    private(set) var phase: VoiceTurnPhase = .idle
+    private(set) var turn: Int = 0
+
+    /// Starts a new utterance. A late reply for an older turn must not move the phase.
+    mutating func beginListening() -> Int {
+        turn += 1
+        phase = .listening
+        return turn
+    }
+
+    mutating func beginProcessing() {
+        guard phase == .listening else { return }
+        phase = .processing
+    }
+
+    /// Shows Larry's reply only if this turn is still the one the user is waiting on.
+    mutating func beginSpeaking(for turn: Int) -> Bool {
+        guard self.turn == turn else { return false }
+        guard phase == .processing || phase == .listening else { return false }
+        phase = .speaking
+        return true
+    }
+
+    /// Mic tap while Larry is answering. The previous lookup may keep running.
+    mutating func interruptSpeaking() -> Int {
+        beginListening()
+    }
+
+    mutating func finishToIdle() {
+        guard phase != .listening else { return }
+        phase = .idle
+    }
+
+    mutating func recoverFromRecognizerError() {
+        phase = .idle
+        turn += 1
+    }
+
+    mutating func timedOut() {
+        phase = .idle
+        turn += 1
+    }
+}
+
+enum VoiceCoachError: LocalizedError {
+    case notReady
+
+    var errorDescription: String? {
+        "Speech recognition isn't ready yet."
+    }
+}
+
+/// Speech-to-text for Larry chat. Replies are on screen. A new listen always rebuilds the engine.
 @MainActor
 final class VoiceCoachService: NSObject, ObservableObject {
     @Published private(set) var isRecording = false
+    @Published private(set) var phase: VoiceTurnPhase = .idle
     @Published private(set) var liveTranscript = ""
     @Published private(set) var isReady = false
     @Published var permissionDenied = false
     @Published var lastError: String?
 
+    private var machine = VoiceTurnMachine()
+    private var acceptingStop = false
     private let speechRecognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
     private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
     private var recognitionTask: SFSpeechRecognitionTask?
@@ -30,52 +95,88 @@ final class VoiceCoachService: NSObject, ObservableObject {
         isReady = speechOK && micOK && !permissionDenied
     }
 
-    func startRecording() throws {
-        guard isReady, !isRecording else { return }
+    /// Tears the previous request down and starts a new one. Safe while a reply or lookup is still in flight.
+    @discardableResult
+    func startRecording() throws -> Int {
+        guard isReady else {
+            publish { $0.recoverFromRecognizerError() }
+            throw VoiceCoachError.notReady
+        }
 
+        let turn = publish { $0.beginListening() }
         lastError = nil
         liveTranscript = ""
         transcriptBox.reset()
-        try configureSessionForRecording()
+        acceptingStop = false
+        resetCapture()
 
-        let request = SFSpeechAudioBufferRecognitionRequest()
-        request.shouldReportPartialResults = true
-        request.requiresOnDeviceRecognition = false
-        recognitionRequest = request
+        do {
+            try configureSessionForRecording()
+            let request = SFSpeechAudioBufferRecognitionRequest()
+            request.shouldReportPartialResults = true
+            request.requiresOnDeviceRecognition = false
+            recognitionRequest = request
 
-        let box = transcriptBox
-        recognitionTask = speechRecognizer?.recognitionTask(with: request) { [weak self] result, error in
-            if let result {
-                box.update(result.bestTranscription.formattedString, isFinal: result.isFinal)
-            }
-            if error != nil {
-                box.markFinished()
-            }
-            Task { @MainActor in
-                guard let self else { return }
+            let box = transcriptBox
+            recognitionTask = speechRecognizer?.recognitionTask(with: request) { [weak self] result, error in
                 if let result {
-                    self.liveTranscript = result.bestTranscription.formattedString
+                    box.update(result.bestTranscription.formattedString, isFinal: result.isFinal)
                 }
-                if let error, self.isRecording {
-                    self.lastError = error.localizedDescription
+                if error != nil {
+                    box.markFinished()
+                }
+                Task { @MainActor in
+                    guard let self else { return }
+                    if let result {
+                        self.liveTranscript = result.bestTranscription.formattedString
+                    }
+                    if let error, !self.acceptingStop, self.machine.phase == .listening, self.machine.turn == turn {
+                        self.lastError = error.localizedDescription
+                        self.resetCapture()
+                        self.deactivateSession()
+                        self.publish { $0.recoverFromRecognizerError() }
+                        self.isRecording = false
+                    }
                 }
             }
-        }
 
-        let input = audioEngine.inputNode
-        let format = input.outputFormat(forBus: 0)
-        if tapInstalled {
-            input.removeTap(onBus: 0)
-            tapInstalled = false
+            let input = audioEngine.inputNode
+            let format = input.outputFormat(forBus: 0)
+            input.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in
+                request.append(buffer)
+            }
+            tapInstalled = true
+            audioEngine.prepare()
+            try audioEngine.start()
+            isRecording = true
+            return turn
+        } catch {
+            resetCapture()
+            deactivateSession()
+            isRecording = false
+            publish { $0.recoverFromRecognizerError() }
+            throw error
         }
-        input.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in
-            request.append(buffer)
-        }
-        tapInstalled = true
+    }
 
-        audioEngine.prepare()
-        try audioEngine.start()
-        isRecording = true
+    /// Ignores a reply that belongs to an older tap.
+    func claimSpeaking(for turn: Int) -> Bool {
+        let accepted = publish { $0.beginSpeaking(for: turn) }
+        return accepted
+    }
+
+    func finishSpeaking() {
+        publish { $0.finishToIdle() }
+    }
+
+    /// Listening hung. Only the turn that is still listening is reset.
+    func timeoutIfStill(_ turn: Int) {
+        guard machine.turn == turn, machine.phase == .listening else { return }
+        resetCapture()
+        deactivateSession()
+        isRecording = false
+        publish { $0.timedOut() }
+        lastError = "Listening timed out. Tap the mic to try again."
     }
 
     private var tapInstalled = false
@@ -84,23 +185,15 @@ final class VoiceCoachService: NSObject, ObservableObject {
     /// `formattedString` often looks like "Catalina crunch." — trailing punctuation is removed
     /// before the text is handed to Larry. Cancelling immediately used to drop that final result.
     func stopRecording() async -> String {
-        let wasRecording = isRecording
-        isRecording = false
-        if audioEngine.isRunning {
-            audioEngine.stop()
-        }
-        if tapInstalled {
-            audioEngine.inputNode.removeTap(onBus: 0)
-            tapInstalled = false
-        }
+        let turn = machine.turn
+        let wasRecording = isRecording || machine.phase == .listening
         guard wasRecording else {
-            recognitionTask?.cancel()
-            recognitionRequest = nil
-            recognitionTask = nil
-            deactivateSession()
             return FoodItemNaming.normalizedSpeechTranscript(liveTranscript)
         }
 
+        acceptingStop = true
+        isRecording = false
+        publish { $0.beginProcessing() }
         recognitionRequest?.endAudio()
 
         let deadline = Date().addingTimeInterval(1.2)
@@ -114,10 +207,12 @@ final class VoiceCoachService: NSObject, ObservableObject {
             }
         }
 
-        recognitionTask?.cancel()
-        recognitionRequest = nil
-        recognitionTask = nil
+        guard machine.turn == turn else {
+            return FoodItemNaming.normalizedSpeechTranscript(transcriptBox.snapshot().text)
+        }
+        resetCapture()
         deactivateSession()
+        acceptingStop = false
 
         let captured = transcriptBox.snapshot().text
         let visible = liveTranscript
@@ -149,6 +244,28 @@ final class VoiceCoachService: NSObject, ObservableObject {
 
     private func deactivateSession() {
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+    }
+
+    /// Drops the tap, request, and task so the next utterance can install a new tap.
+    private func resetCapture() {
+        recognitionRequest?.endAudio()
+        recognitionTask?.cancel()
+        recognitionRequest = nil
+        recognitionTask = nil
+        if audioEngine.isRunning {
+            audioEngine.stop()
+        }
+        if tapInstalled {
+            audioEngine.inputNode.removeTap(onBus: 0)
+            tapInstalled = false
+        }
+    }
+
+    @discardableResult
+    private func publish<T>(_ change: (inout VoiceTurnMachine) -> T) -> T {
+        let value = change(&machine)
+        phase = machine.phase
+        return value
     }
 
 }

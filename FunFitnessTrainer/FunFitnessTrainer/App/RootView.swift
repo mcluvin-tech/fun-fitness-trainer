@@ -124,7 +124,12 @@ struct MainTabView: View {
             .animation(.spring(response: 0.35, dampingFraction: 0.85), value: tab)
 
             if appState.larryReaction == nil {
-                FloatingHomeTabBar(selection: $tab)
+                FloatingHomeTabBar(selection: $tab, voicePhase: appState.voicePhase) {
+                    appState.larryListenNonce += 1
+                    withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
+                        tab = .larry
+                    }
+                }
                     .padding(.horizontal, 18)
                     .padding(.bottom, 8)
                     .transition(.move(edge: .bottom).combined(with: .opacity))
@@ -270,6 +275,8 @@ private enum MainTabLogAction {
 
 struct FloatingHomeTabBar: View {
     @Binding var selection: HomeTab
+    var voicePhase: VoiceTurnPhase = .idle
+    var onLarry: () -> Void = {}
 
     private let larryButtonSize: CGFloat = 56
 
@@ -305,13 +312,15 @@ struct FloatingHomeTabBar: View {
 
     private var larryTalkButton: some View {
         let selected = selection == .larry
+        let ring = voiceRing
         return Button {
             HomeHaptics.soft()
-            withAnimation(.spring(response: 0.35, dampingFraction: 0.82)) {
-                selection = .larry
-            }
+            onLarry()
         } label: {
             ZStack {
+                Circle()
+                    .stroke(ring.color.opacity(ring.visible ? 0.9 : 0), lineWidth: 3)
+                    .frame(width: larryButtonSize + 10, height: larryButtonSize + 10)
                 Circle()
                     .fill(
                         LinearGradient(
@@ -342,8 +351,17 @@ struct FloatingHomeTabBar: View {
             .scaleEffect(selected ? 1.03 : 0.98)
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("Talk to Larry")
+        .accessibilityLabel(voicePhase == .listening ? "Stop and send" : "Talk to Larry")
         .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+
+    private var voiceRing: (color: Color, visible: Bool) {
+        switch voicePhase {
+        case .listening: return (BrandTheme.teal, true)
+        case .processing: return (BrandTheme.magenta, true)
+        case .speaking: return (BrandTheme.purple, true)
+        case .idle: return (.clear, false)
+        }
     }
 
     private func tabButton(_ tab: HomeTab, label: String, systemImage: String) -> some View {

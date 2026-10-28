@@ -64,6 +64,8 @@ struct CoachChatView: View {
     @State private var optimisticMealIDs: [UUID] = []
     @State private var skipNextSuggestedMealInsert = false
     @State private var logToast: String?
+    /// Turn that the open listen belongs to. A late reply for an older turn must not grab the mic.
+    @State private var activeVoiceTurn = 0
 
     private var todayMeals: [Meal] {
         DaySummaryService.mealsToday(from: allMeals)
@@ -251,6 +253,21 @@ struct CoachChatView: View {
                 if phase == .listening {
                     phase = .idle
                 }
+            }
+        }
+        .onChange(of: appState.larryListenNonce) { _, nonce in
+            guard nonce > 0 else { return }
+            if voice.phase == .listening {
+                finishVoiceAndSend()
+            } else {
+                beginVoiceInput()
+            }
+        }
+        .onChange(of: voice.phase) { _, newPhase in
+            appState.voicePhase = newPhase
+            if newPhase == .idle, phase == .listening {
+                phase = .idle
+                voiceError = voice.lastError
             }
         }
         .task {
@@ -576,6 +593,14 @@ struct CoachChatView: View {
                     .padding(.horizontal, 4)
             }
 
+            if let voiceStatus {
+                Text(voiceStatus)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(BrandTheme.homeSecondaryText)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 8)
+            }
+
             if phase == .reply, dismissAfterReply {
                 Button(action: returnHome) {
                     ZStack {
@@ -612,9 +637,8 @@ struct CoachChatView: View {
                 }
                 .buttonStyle(.plain)
                 .transition(.opacity)
-            } else {
-                modernComposer
             }
+            modernComposer
         }
         .padding(.horizontal, 14)
         .padding(.top, 6)
@@ -634,7 +658,8 @@ struct CoachChatView: View {
             }
             try? await Task.sleep(nanoseconds: 2_000_000_000)
             guard !Task.isCancelled, phase == .reply, dismissAfterReply else { return }
-            returnHome()
+            // Stay on Larry. The mic is still there so the next food can be spoken.
+            // Done is what switches to Today.
         }
     }
 
@@ -651,17 +676,17 @@ struct CoachChatView: View {
                     .lineLimit(1...4)
                     .submitLabel(.send)
                     .onSubmit { sendUser(input, voiceMode: false) }
-                    .disabled(isLoading)
+                    .disabled(false)
             }
 
             Button(action: micTapped) {
-                Image(systemName: voice.isRecording ? "stop.fill" : "mic.fill")
+                Image(systemName: voice.phase == .listening ? "stop.fill" : "mic.fill")
                     .font(.body.weight(.bold))
                     .foregroundStyle(.white)
                     .frame(width: 40, height: 40)
                     .background {
                         Circle()
-                            .fill(voice.isRecording ? Color.red : BrandTheme.purple)
+                            .fill(voice.phase == .listening ? Color.red : (voice.phase == .processing ? BrandTheme.teal : BrandTheme.purple))
                             .shadow(
                                 color: (voice.isRecording ? Color.red : BrandTheme.purple).opacity(0.45),
                                 radius: voice.isRecording ? 10 : 8,
@@ -669,8 +694,8 @@ struct CoachChatView: View {
                             )
                     }
             }
-            .disabled(!voice.isReady || isLoading)
-            .accessibilityLabel(voice.isRecording ? "Stop and send" : "Talk to Larry")
+            .disabled(voice.permissionDenied)
+            .accessibilityLabel(voice.phase == .listening ? "Stop and send" : "Talk to Larry")
 
             if !voice.isRecording {
                 Button {
@@ -752,32 +777,69 @@ struct CoachChatView: View {
         }
     }
 
+    private var voiceStatus: String? {
+        switch voice.phase {
+        case .listening:
+            return "Listening"
+        case .processing:
+            return "Logging that. You can talk again."
+        case .speaking:
+            return "Tap the mic to log another."
+        case .idle:
+            return nil
+        }
+    }
+
     private func micTapped() {
         voiceError = nil
-        if voice.isRecording {
-            withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) {
-                phase = .thinking
-            }
-            Task {
-                let transcript = await voice.stopRecording()
-                guard !transcript.isEmpty else {
-                    phase = .idle
-                    voiceError = "Didn't catch that. Try again."
-                    return
-                }
-                sendUser(transcript, voiceMode: true)
-            }
+        if voice.phase == .listening || voice.isRecording {
+            finishVoiceAndSend()
         } else {
-            showKeyboard = false
-            composerFocused = false
+            beginVoiceInput()
+        }
+    }
+
+    /// Mic and the center Larry button share this. It interrupts a reply and does not wait on the previous lookup.
+    private func beginVoiceInput() {
+        dismissAfterReply = false
+        dinnerPlates = []
+        showKeyboard = false
+        composerFocused = false
+        Task {
+            if !voice.isReady {
+                await voice.prepare()
+            }
             do {
-                try voice.startRecording()
+                let turn = try voice.startRecording()
+                activeVoiceTurn = turn
+                voiceError = nil
                 withAnimation(.spring(response: 0.35, dampingFraction: 0.7)) {
                     phase = .listening
                 }
+                Task {
+                    try? await Task.sleep(nanoseconds: 45_000_000_000)
+                    voice.timeoutIfStill(turn)
+                }
             } catch {
+                phase = .idle
                 voiceError = error.localizedDescription
             }
+        }
+    }
+
+    private func finishVoiceAndSend() {
+        withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) {
+            phase = .thinking
+        }
+        Task {
+            let transcript = await voice.stopRecording()
+            guard !transcript.isEmpty else {
+                phase = .idle
+                voice.finishSpeaking()
+                voiceError = "Didn't catch that. Try again."
+                return
+            }
+            sendUser(transcript, voiceMode: true)
         }
     }
 
@@ -841,6 +903,7 @@ struct CoachChatView: View {
     }
 
     private func reply(voiceMode: Bool) async {
+        let voiceTurn = activeVoiceTurn
         isLoading = true
         defer { isLoading = false }
 
@@ -874,7 +937,7 @@ struct CoachChatView: View {
             stepGoal: HealthActivityPreferences.stepGoal,
             settings: settings
         )
-        presentLarry(response, isMealLog: response.suggested_meal != nil)
+        presentLarry(response, isMealLog: response.suggested_meal != nil, fromVoice: voiceMode, turn: voiceTurn)
         persistChat()
         if response.clear_todays_log == true {
             clearTodaysLog()
@@ -905,13 +968,19 @@ struct CoachChatView: View {
         sendUser("I'm having \(plate.name)", voiceMode: false)
     }
 
-    private func presentLarry(_ response: TrainerChatResponse, isMealLog: Bool = false) {
+    private func presentLarry(_ response: TrainerChatResponse, isMealLog: Bool = false, fromVoice: Bool = false, turn: Int = 0) {
         let spoken = response.spokenReply
         guard !spoken.isEmpty else {
-            phase = .idle
+            if phase != .listening {
+                phase = .idle
+            }
             return
         }
         messages.append(ChatBubble(text: spoken, isUser: false))
+        if fromVoice, !voice.claimSpeaking(for: turn) {
+            persistChat()
+            return
+        }
         // #region agent log
         AgentDebugLog.emit(
             hypothesisId: "C",
@@ -942,6 +1011,7 @@ struct CoachChatView: View {
         showKeyboard = false
         withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
             phase = .idle
+            voice.finishSpeaking()
             larryReply = ""
             dinnerPlates = []
             dinnerHeader = ""

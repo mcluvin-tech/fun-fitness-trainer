@@ -234,3 +234,62 @@ final class LarryReactionEngineTests: XCTestCase {
         ))
     }
 }
+
+final class VoiceTurnMachineTests: XCTestCase {
+    func testLogThenLogAgain() {
+        var machine = VoiceTurnMachine()
+        let first = machine.beginListening()
+        XCTAssertEqual(machine.phase, .listening)
+        machine.beginProcessing()
+        XCTAssertEqual(machine.phase, .processing)
+        XCTAssertTrue(machine.beginSpeaking(for: first))
+        XCTAssertEqual(machine.phase, .speaking)
+
+        machine.finishToIdle()
+        XCTAssertEqual(machine.phase, .idle)
+        let second = machine.beginListening()
+        XCTAssertEqual(machine.phase, .listening)
+        XCTAssertNotEqual(first, second)
+        XCTAssertFalse(machine.beginSpeaking(for: first), "The first meal's reply must not take the mic back")
+        XCTAssertEqual(machine.phase, .listening)
+    }
+
+    func testInterruptWhileSpeakingStartsAnotherListen() {
+        var machine = VoiceTurnMachine()
+        let spoken = machine.beginListening()
+        machine.beginProcessing()
+        XCTAssertTrue(machine.beginSpeaking(for: spoken))
+
+        let next = machine.interruptSpeaking()
+        XCTAssertEqual(machine.phase, .listening)
+        XCTAssertNotEqual(spoken, next)
+        XCTAssertFalse(machine.beginSpeaking(for: spoken))
+        XCTAssertEqual(machine.phase, .listening)
+    }
+
+    func testRecognizerErrorRecoversToIdleAndListensAgain() {
+        var machine = VoiceTurnMachine()
+        _ = machine.beginListening()
+        machine.recoverFromRecognizerError()
+        XCTAssertEqual(machine.phase, .idle)
+
+        let again = machine.beginListening()
+        XCTAssertEqual(machine.phase, .listening)
+        XCTAssertGreaterThan(again, 0)
+        machine.beginProcessing()
+        machine.recoverFromRecognizerError()
+        XCTAssertEqual(machine.phase, .idle)
+        _ = machine.beginListening()
+        XCTAssertEqual(machine.phase, .listening)
+    }
+
+    func testTimeoutResetsAndAllowsTheNextMeal() {
+        var machine = VoiceTurnMachine()
+        let stuck = machine.beginListening()
+        machine.timedOut()
+        XCTAssertEqual(machine.phase, .idle)
+        XCTAssertFalse(machine.beginSpeaking(for: stuck))
+        _ = machine.beginListening()
+        XCTAssertEqual(machine.phase, .listening)
+    }
+}

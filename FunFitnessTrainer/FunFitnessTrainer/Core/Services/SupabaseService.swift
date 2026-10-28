@@ -75,13 +75,26 @@ final class SupabaseService: ObservableObject {
 
         let delegate = OAuthRedirectProbeDelegate()
         let session = URLSession(configuration: .ephemeral, delegate: delegate, delegateQueue: nil)
-        let (data, response) = try await session.data(for: request)
+        defer { session.finishTasksAndInvalidate() }
+
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await session.data(for: request)
+        } catch {
+            // Refusing the redirect completes the task with "The network connection was lost."
+            // A 3xx means Google is enabled; the browser session performs the real sign-in.
+            if let status = delegate.redirectStatus, (300...399).contains(status) {
+                return
+            }
+            throw error
+        }
         guard let http = response as? HTTPURLResponse else {
             throw APIError.invalidResponse
         }
 
         // Enabled providers redirect to Google/Apple; disabled ones return 400 JSON.
-        if (300...399).contains(http.statusCode) { return }
+        if (300...399).contains(http.statusCode) || delegate.redirectStatus != nil { return }
 
         if http.statusCode == 400,
            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -152,6 +165,17 @@ final class SupabaseService: ObservableObject {
     func sendPhoneOTP(phone: String) async throws {
         guard let url = AppConfig.supabaseURL?.appendingPathComponent("auth/v1/otp"),
               let anon = AppConfig.supabaseAnonKey else {
+            // #region agent log
+            AgentDebugLog.emit(
+                hypothesisId: "B",
+                location: "SupabaseService.sendPhoneOTP",
+                message: "missing configuration",
+                data: [
+                    "hasURL": AppConfig.supabaseURL != nil,
+                    "hasAnonKey": AppConfig.supabaseAnonKey != nil,
+                ]
+            )
+            // #endregion
             throw APIError.missingConfiguration
         }
 
@@ -163,9 +187,74 @@ final class SupabaseService: ObservableObject {
             "phone": phone,
             "create_user": true,
         ])
+        let hasAuthorization = request.value(forHTTPHeaderField: "Authorization") != nil
+        // #region agent log
+        AgentDebugLog.emit(
+            hypothesisId: "C",
+            location: "SupabaseService.sendPhoneOTP",
+            message: "about to POST otp",
+            data: [
+                "host": url.host ?? "",
+                "path": url.path,
+                "scheme": url.scheme ?? "",
+                "phoneLength": phone.count,
+                "phonePrefix": String(phone.prefix(2)),
+                "hasAuthorization": hasAuthorization,
+                "anonKeyLength": anon.count,
+                "bodyBytes": request.httpBody?.count ?? 0,
+            ]
+        )
+        // #endregion
 
-        let (data, response) = try await URLSession.shared.data(for: request)
-        guard let http = response as? HTTPURLResponse else { throw APIError.invalidResponse }
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await URLSession.shared.data(for: request)
+        } catch {
+            let ns = error as NSError
+            // #region agent log
+            AgentDebugLog.emit(
+                hypothesisId: "D",
+                location: "SupabaseService.sendPhoneOTP",
+                message: "otp URLSession error",
+                data: [
+                    "errorDomain": ns.domain,
+                    "errorCode": ns.code,
+                    "errorDescription": error.localizedDescription,
+                    "hasAuthorization": hasAuthorization,
+                    "anonKeyLength": anon.count,
+                    "host": url.host ?? "",
+                    "path": url.path,
+                ]
+            )
+            // #endregion
+            throw Self.networkAuthError(ns, host: url.host)
+        }
+
+        guard let http = response as? HTTPURLResponse else {
+            // #region agent log
+            AgentDebugLog.emit(
+                hypothesisId: "D",
+                location: "SupabaseService.sendPhoneOTP",
+                message: "non-HTTP response",
+                data: ["responseType": String(describing: type(of: response))]
+            )
+            // #endregion
+            throw APIError.invalidResponse
+        }
+        // #region agent log
+        AgentDebugLog.emit(
+            hypothesisId: "D",
+            location: "SupabaseService.sendPhoneOTP",
+            message: "otp HTTP response",
+            data: [
+                "statusCode": http.statusCode,
+                "bytes": data.count,
+                "hasAuthorization": hasAuthorization,
+                "anonKeyLength": anon.count,
+            ]
+        )
+        // #endregion
         guard (200...299).contains(http.statusCode) else {
             throw Self.authAPIError(data: data, statusCode: http.statusCode, fallback: "Could not send verification code.")
         }
@@ -225,6 +314,24 @@ final class SupabaseService: ObservableObject {
         return .serverMessage("\(fallback) (HTTP \(statusCode)).")
     }
 
+    /// Maps URLSession failures so a dead/paused project URL isn't shown as a vague "network lost".
+    private static func networkAuthError(_ error: NSError, host: String?) -> Error {
+        guard error.domain == NSURLErrorDomain else { return error }
+        let hostLabel = host ?? "your Supabase URL"
+        switch error.code {
+        case NSURLErrorCannotFindHost, NSURLErrorDNSLookupFailed:
+            return APIError.serverMessage(
+                "Can't find Supabase host \(hostLabel). Check SUPABASE_URL in Secrets.plist — the project may be deleted or the URL mistyped."
+            )
+        case NSURLErrorNetworkConnectionLost, NSURLErrorCannotConnectToHost, NSURLErrorTimedOut, NSURLErrorNotConnectedToInternet:
+            return APIError.serverMessage(
+                "Can't reach \(hostLabel). Confirm the Supabase project is active (not paused/deleted), Phone auth is enabled, and this phone is online. [\(error.domain):\(error.code)]"
+            )
+        default:
+            return error
+        }
+    }
+
     func signInWithApple(idToken: String, nonce: String) async throws {
         guard let url = AppConfig.supabaseURL?.appendingPathComponent("auth/v1/token"),
               let anon = AppConfig.supabaseAnonKey else {
@@ -259,10 +366,51 @@ final class SupabaseService: ObservableObject {
         try await refreshCurrentUserId()
     }
 
+    /// - Parameter retries: Extra attempts after the first on transient network failures (lost connection, timeout, DNS).
     func invokeFunction(
         name: String,
         body: [String: Any],
-        timeout: TimeInterval = 60
+        timeout: TimeInterval = 60,
+        retries: Int = 0
+    ) async throws -> Data {
+        var lastError: Error?
+        let attempts = max(retries, 0) + 1
+        for attempt in 1...attempts {
+            do {
+                return try await invokeFunctionOnce(name: name, body: body, timeout: timeout)
+            } catch where Self.isTransientNetworkFailure(error) {
+                lastError = error
+                if attempt < attempts {
+                    let delayNs = UInt64(attempt) * 700_000_000
+                    try? await Task.sleep(nanoseconds: delayNs)
+                    continue
+                }
+            }
+        }
+        throw lastError ?? APIError.invalidResponse
+    }
+
+    private static func isTransientNetworkFailure(_ error: Error) -> Bool {
+        if let urlError = error as? URLError {
+            return isTransientNetworkError(urlError)
+        }
+        let ns = error as NSError
+        guard ns.domain == NSURLErrorDomain else { return false }
+        return [
+            NSURLErrorNetworkConnectionLost,
+            NSURLErrorTimedOut,
+            NSURLErrorNotConnectedToInternet,
+            NSURLErrorCannotConnectToHost,
+            NSURLErrorCannotFindHost,
+            NSURLErrorDNSLookupFailed,
+            NSURLErrorDataNotAllowed,
+        ].contains(ns.code)
+    }
+
+    private func invokeFunctionOnce(
+        name: String,
+        body: [String: Any],
+        timeout: TimeInterval
     ) async throws -> Data {
         guard let base = AppConfig.supabaseURL else { throw APIError.missingConfiguration }
         let url = base.appendingPathComponent("functions/v1/\(name)")
@@ -287,6 +435,16 @@ final class SupabaseService: ObservableObject {
             throw APIError.serverMessage(message)
         }
         return data
+    }
+
+    private static func isTransientNetworkError(_ error: URLError) -> Bool {
+        switch error.code {
+        case .networkConnectionLost, .timedOut, .notConnectedToInternet,
+             .cannotConnectToHost, .cannotFindHost, .dnsLookupFailed:
+            return true
+        default:
+            return false
+        }
     }
 
     func syncTrainerVoice(_ voice: String) async throws {
@@ -334,7 +492,18 @@ final class SupabaseService: ObservableObject {
 }
 
 /// Stops URLSession from following OAuth redirects so we can probe provider status.
-private final class OAuthRedirectProbeDelegate: NSObject, URLSessionTaskDelegate {
+/// Cancelling the redirect makes `data(for:)` throw `NSURLErrorNetworkConnectionLost`;
+/// `redirectStatus` lets the caller treat that as "provider is enabled."
+private final class OAuthRedirectProbeDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+    private let lock = NSLock()
+    private var redirectStatusCode: Int?
+
+    var redirectStatus: Int? {
+        lock.lock()
+        defer { lock.unlock() }
+        return redirectStatusCode
+    }
+
     func urlSession(
         _ session: URLSession,
         task: URLSessionTask,
@@ -342,6 +511,9 @@ private final class OAuthRedirectProbeDelegate: NSObject, URLSessionTaskDelegate
         newRequest request: URLRequest,
         completionHandler: @escaping (URLRequest?) -> Void
     ) {
+        lock.lock()
+        redirectStatusCode = response.statusCode
+        lock.unlock()
         completionHandler(nil)
     }
 }

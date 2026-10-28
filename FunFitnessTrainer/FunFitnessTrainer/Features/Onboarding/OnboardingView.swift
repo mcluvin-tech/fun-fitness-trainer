@@ -1,9 +1,11 @@
 import SwiftUI
 import SwiftData
+import PhotosUI
 
 struct OnboardingView: View {
     @EnvironmentObject private var appState: AppState
     @Environment(\.modelContext) private var context
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     @State private var step = 0
     @State private var usesImperial = true
@@ -18,10 +20,14 @@ struct OnboardingView: View {
     @State private var heightFt = 5
     @State private var heightIn = 9
     @State private var activity: ActivityLevel = .moderate
+    @State private var diet: DietStyle = .balanced
     @State private var saveError: String?
-    @State private var welcomeQuote = LarryMcQuade.randomWelcomeMessage()
+    @State private var showProgressCamera = false
+    @State private var progressPickerItem: PhotosPickerItem?
+    @State private var progressPreview: UIImage?
+    @State private var didLoadExistingProfile = false
 
-    private let totalSteps = 4
+    private let totalSteps = 6
 
     private var draftSettings: UserSettings {
         UserSettings(
@@ -34,6 +40,7 @@ struct OnboardingView: View {
             usesImperialUnits: usesImperial,
             activity: activity,
             goalType: inferredGoalType,
+            dietStyle: diet,
             trainerVoice: LarryMcQuade.defaultVoice
         )
     }
@@ -45,84 +52,71 @@ struct OnboardingView: View {
     private var stepTitle: String {
         switch step {
         case 0: return "Welcome"
-        case 1: return "Your weights"
-        case 2: return "About you"
-        case 3: return "Your plan"
+        case 1: return "Your diet"
+        case 2: return "Your weights"
+        case 3: return "About You"
+        case 4: return "Your plan"
+        case 5: return "Day one photo"
         default: return "Your plan"
         }
     }
 
+    /// Centered title, quiet back button, no divider. Used by the tighter onboarding steps.
+    private var usesCompactOnboardingChrome: Bool {
+        step == 3 || step == 5
+    }
+
     private var primaryButtonTitle: String {
-        step < totalSteps - 1 ? "Continue" : "Start training"
+        if step < totalSteps - 1 { return "Continue" }
+        return progressPreview == nil ? "Skip for now" : "Start training"
     }
 
     var body: some View {
         NavigationStack {
             ScrollView {
-                VStack(spacing: 24) {
+                VStack(spacing: step == 0 ? 0 : 24) {
                     stepContent
                 }
-                .padding()
+                .padding(.horizontal, step == 0 ? 24 : (usesCompactOnboardingChrome ? 20 : 16))
+                .padding(.top, step == 0 ? 4 : (usesCompactOnboardingChrome ? 8 : 16))
+                .padding(.bottom, step == 0 ? 12 : 16)
                 .frame(maxWidth: .infinity)
             }
+            .scrollBounceBehavior(.basedOnSize)
             .background { HomeDarkBackground() }
             .preferredColorScheme(.dark)
-            .navigationTitle(stepTitle)
-            .navigationBarTitleDisplayMode(.large)
+            .navigationTitle(step == 0 ? "" : stepTitle)
+            .navigationBarTitleDisplayMode(step == 0 || usesCompactOnboardingChrome ? .inline : .large)
             .toolbarBackground(.hidden, for: .navigationBar)
-            .safeAreaInset(edge: .bottom) {
-                VStack(spacing: 12) {
-                    if let saveError {
-                        Text(saveError)
-                            .font(.caption)
-                            .foregroundStyle(.red)
-                            .multilineTextAlignment(.center)
-                    }
-
-                    Button {
-                        advance()
-                    } label: {
-                        Text(primaryButtonTitle)
-                            .font(.headline)
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 4)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .tint(Color.brandAccent)
-
-                    if step > 0 {
-                        Button("Back") { step -= 1 }
-                            .font(.subheadline)
-                            .foregroundStyle(BrandTheme.teal)
-                    }
-                }
-                .padding(.horizontal, 20)
-                .padding(.top, 12)
-                .padding(.bottom, 8)
-                .background {
-                    BrandTheme.homeActionBar
-                        .overlay(alignment: .top) {
-                            Rectangle()
-                                .fill(BrandTheme.purple.opacity(0.35))
-                                .frame(height: 1)
-                        }
-                        .ignoresSafeArea(edges: .bottom)
-                }
-            }
-            .toolbar {
-                if step == 0 {
-                    ToolbarItem(placement: .topBarTrailing) {
-                        Button("Skip") { finish() }
-                            .font(.subheadline)
-                            .foregroundStyle(BrandTheme.teal)
-                    }
+            .toolbar(step == 0 ? .hidden : .visible, for: .navigationBar)
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                if step > 0 {
+                    onboardingBottomBar
                 }
             }
             .onChange(of: currentWeightKg) { _, _ in syncWeeklyIfNeeded() }
             .onChange(of: goalWeightKg) { _, _ in syncWeeklyIfNeeded() }
+            .onChange(of: progressPickerItem) { _, item in
+                Task {
+                    guard let item else { return }
+                    if let data = try? await item.loadTransferable(type: Data.self),
+                       let image = UIImage(data: data) {
+                        await MainActor.run {
+                            progressPreview = image
+                            progressPickerItem = nil
+                        }
+                    }
+                }
+            }
+            .fullScreenCover(isPresented: $showProgressCamera) {
+                CameraCaptureView(purpose: .progress) { image in
+                    progressPreview = image
+                }
+            }
             .onAppear {
+                loadExistingProfileIfNeeded()
                 syncWeeklyIfNeeded()
-                updateHeightCm()
+                if usesImperial { updateHeightCm() }
             }
         }
     }
@@ -131,58 +125,176 @@ struct OnboardingView: View {
     private var stepContent: some View {
         switch step {
         case 0: welcomeStep
-        case 1: weightsStep
-        case 2: bodyStep
-        case 3: planStep
+        case 1: dietStep
+        case 2: weightsStep
+        case 3: bodyStep
+        case 4: planStep
+        case 5: progressPhotoStep
         default: EmptyView()
         }
     }
 
     // MARK: - Steps
 
+    private var welcomeQuote: String {
+        "If you wanna look as sexy as me, you're gonna have to lock in!"
+    }
+
     private var welcomeStep: some View {
-        VStack(spacing: 20) {
-            LarryHeroImage(portrait: .welcome, maxHeight: 300)
+        VStack(spacing: 0) {
+            welcomeHeader
 
-            Text(LarryMcQuade.appName)
-                .font(.largeTitle.bold())
-                .multilineTextAlignment(.center)
-                .foregroundStyle(
-                    LinearGradient(
-                        colors: [BrandTheme.magenta, BrandTheme.purple],
-                        startPoint: .leading,
-                        endPoint: .trailing
-                    )
-                )
+            LarryHeroImage(
+                portrait: .welcome,
+                maxHeight: dynamicTypeSize.isAccessibilitySize ? 168 : 240,
+                aspectRatio: 16.0 / 10.0,
+                cornerRadius: 22,
+                showsNeonBorder: false
+            )
+            .padding(.top, 8)
 
-            Text("Meet **\(LarryMcQuade.name)** — \(LarryMcQuade.title.lowercased()). Your 80s gym guru for realistic weight goals, daily calories, and macros. Not medical advice.")
-                .font(.body)
-                .multilineTextAlignment(.center)
+            VStack(spacing: 2) {
+                Text(LarryMcQuade.name)
+                    .font(OnboardingType.font(32, weight: .bold, relativeTo: .largeTitle))
+                    .foregroundStyle(BrandTheme.homePrimaryText)
+                    .multilineTextAlignment(.center)
+                    .lineLimit(2)
+                    .minimumScaleFactor(0.75)
+                Text("Macro Tracker")
+                    .font(OnboardingType.font(26, weight: .bold, relativeTo: .title1))
+                    .foregroundStyle(BrandTheme.homePrimaryText.opacity(0.92))
+                    .multilineTextAlignment(.center)
+                    .lineLimit(2)
+                    .minimumScaleFactor(0.75)
+            }
+            .multilineTextAlignment(.center)
+            .padding(.top, 16)
+            .accessibilityElement(children: .combine)
+            .accessibilityAddTraits(.isHeader)
+
+            Text("Your 80s macro coach for realistic weight goals, daily calories, and macros.")
+                .font(OnboardingType.font(17, weight: .regular, relativeTo: .body))
                 .foregroundStyle(BrandTheme.homeSecondaryText)
-
-            Text("\"\(welcomeQuote)\"")
-                .font(.subheadline.weight(.semibold))
-                .italic()
                 .multilineTextAlignment(.center)
+                .lineSpacing(3)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: 340)
+                .padding(.top, 12)
+
+            Text("Not medical advice.")
+                .font(OnboardingType.font(13, weight: .regular, relativeTo: .footnote))
+                .foregroundStyle(Color.white.opacity(0.5))
+                .padding(.top, 8)
+
+            Text("\u{201C}\(welcomeQuote)\u{201D}")
+                .font(OnboardingType.font(16, weight: .medium, relativeTo: .callout).italic())
                 .foregroundStyle(BrandTheme.teal)
+                .multilineTextAlignment(.center)
+                .lineSpacing(2)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: 320)
+                .padding(.top, 12)
+
+            Button(action: advance) {
+                Text("Get Started")
+                    .font(OnboardingType.font(17, weight: .semibold, relativeTo: .headline))
+                    .foregroundStyle(Color.white)
+                    .frame(maxWidth: .infinity)
+                    .frame(minHeight: 56)
+                    .background(Color.brandAccent, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            }
+            .buttonStyle(OnboardingPressStyle())
+            .padding(.top, 20)
+            .accessibilityHint("Continues to diet and goal setup")
 
             AuthSignInSection()
+                .padding(.top, 12)
         }
-        .padding(.top, 8)
-        .padding(.vertical, 12)
-        .background(BrandTheme.homeCard)
-        .overlay(
-            RoundedRectangle(cornerRadius: 20)
-                .stroke(
-                    LinearGradient(
-                        colors: [BrandTheme.purple.opacity(0.5), BrandTheme.teal.opacity(0.3)],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    ),
-                    lineWidth: 1
-                )
-        )
-        .clipShape(RoundedRectangle(cornerRadius: 20))
+        .dynamicTypeSize(...DynamicTypeSize.accessibility2)
+    }
+
+    private var welcomeHeader: some View {
+        ZStack {
+            Text("Welcome")
+                .font(OnboardingType.font(20, weight: .semibold, relativeTo: .title3))
+                .foregroundStyle(BrandTheme.homePrimaryText)
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+                .padding(.horizontal, 64)
+                .accessibilityAddTraits(.isHeader)
+
+            HStack {
+                Spacer(minLength: 0)
+                Button(action: finish) {
+                    Text("Skip")
+                        .font(OnboardingType.font(17, weight: .semibold, relativeTo: .body))
+                        .foregroundStyle(BrandTheme.homeSecondaryText)
+                        .frame(minWidth: 44, minHeight: 44)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityHint("Skips the rest of setup")
+            }
+        }
+        .frame(minHeight: 44)
+    }
+
+    private var onboardingBottomBar: some View {
+        VStack(spacing: 12) {
+            if let saveError {
+                Text(saveError)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .multilineTextAlignment(.center)
+            }
+
+            Button {
+                advance()
+            } label: {
+                Text(primaryButtonTitle)
+                    .font(.headline)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 4)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(Color.brandAccent)
+
+            if step > 0 {
+                Button("Back") { step -= 1 }
+                    .font(usesCompactOnboardingChrome ? OnboardingType.font(15, weight: .semibold, relativeTo: .subheadline) : .subheadline)
+                    .foregroundStyle(usesCompactOnboardingChrome ? BrandTheme.homeSecondaryText : BrandTheme.teal)
+                    .frame(minHeight: 44)
+                    .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 20)
+        .padding(.top, 12)
+        .padding(.bottom, 8)
+        .background {
+            BrandTheme.homeActionBar
+                .overlay(alignment: .top) {
+                    if !usesCompactOnboardingChrome {
+                        Rectangle()
+                            .fill(BrandTheme.purple.opacity(0.35))
+                            .frame(height: 1)
+                    }
+                }
+                .ignoresSafeArea(edges: .bottom)
+        }
+    }
+
+    private var dietStep: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Pick how you like to eat. This sets the macro split. Calories still come from your weight, activity, and pace.")
+                .font(.subheadline)
+                .foregroundStyle(BrandTheme.homeSecondaryText)
+
+            ForEach(DietStyle.allCases) { style in
+                DietStyleOptionCard(style: style, isSelected: diet == style) {
+                    diet = style
+                }
+            }
+        }
     }
 
     private var weightsStep: some View {
@@ -261,44 +373,174 @@ struct OnboardingView: View {
     }
 
     private var bodyStep: some View {
-        VStack(spacing: 16) {
-            Picker("Sex", selection: $sex) {
-                ForEach(Sex.allCases) { Text($0.rawValue.capitalized).tag($0) }
-            }
-            .pickerStyle(.segmented)
+        VStack(spacing: 8) {
+            Text("Help Larry dial in your daily targets.")
+                .font(OnboardingType.font(15, weight: .regular, relativeTo: .subheadline))
+                .foregroundStyle(BrandTheme.homeSecondaryText)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: .infinity)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.bottom, 8)
 
-            onboardingRow {
-                Stepper("Age: \(age)", value: $age, in: 16...90)
-            }
+            aboutYouSexControl
+                .padding(.bottom, 4)
 
-            if usesImperial {
-                HStack {
-                    Picker("Ft", selection: $heightFt) {
-                        ForEach(4...7, id: \.self) { Text("\($0) ft").tag($0) }
-                    }
-                    Picker("In", selection: $heightIn) {
-                        ForEach(0...11, id: \.self) { Text("\($0) in").tag($0) }
-                    }
-                }
-                .onChange(of: heightFt) { _, _ in updateHeightCm() }
-                .onChange(of: heightIn) { _, _ in updateHeightCm() }
-            } else {
-                onboardingRow {
-                    Stepper("Height: \(Int(heightCm)) cm", value: $heightCm, in: 120...220, step: 1)
+            aboutYouRow("Age") {
+                HStack(spacing: 12) {
+                    Text("\(age)")
+                        .font(OnboardingType.font(16, weight: .semibold, relativeTo: .body))
+                        .foregroundStyle(BrandTheme.homePrimaryText)
+                        .monospacedDigit()
+                    Stepper("Age", value: $age, in: 16...90)
+                        .labelsHidden()
+                        .tint(BrandTheme.teal)
                 }
             }
 
-            Picker("Activity", selection: $activity) {
-                ForEach(ActivityLevel.allCases) { Text($0.displayName).tag($0) }
+            aboutYouRow("Height") {
+                if usesImperial {
+                    HStack(spacing: 2) {
+                        aboutYouMenuPicker(
+                            label: "Feet",
+                            value: "\(heightFt) ft",
+                            accessibilityValue: "\(heightFt) feet"
+                        ) {
+                            ForEach(4...7, id: \.self) { value in
+                                Text("\(value) ft").tag(value)
+                            }
+                        } selection: {
+                            $heightFt
+                        }
+                        aboutYouMenuPicker(
+                            label: "Inches",
+                            value: "\(heightIn) in",
+                            accessibilityValue: "\(heightIn) inches"
+                        ) {
+                            ForEach(0...11, id: \.self) { value in
+                                Text("\(value) in").tag(value)
+                            }
+                        } selection: {
+                            $heightIn
+                        }
+                    }
+                    .onChange(of: heightFt) { _, _ in updateHeightCm() }
+                    .onChange(of: heightIn) { _, _ in updateHeightCm() }
+                } else {
+                    HStack(spacing: 12) {
+                        Text("\(Int(heightCm)) cm")
+                            .font(OnboardingType.font(16, weight: .semibold, relativeTo: .body))
+                            .foregroundStyle(BrandTheme.homePrimaryText)
+                            .monospacedDigit()
+                        Stepper("Height", value: $heightCm, in: 120...220, step: 1)
+                            .labelsHidden()
+                            .tint(BrandTheme.teal)
+                    }
+                }
+            }
+
+            aboutYouRow("Activity Level") {
+                aboutYouMenuPicker(
+                    label: "Activity Level",
+                    value: activity.displayName,
+                    accessibilityValue: activity.displayName
+                ) {
+                    ForEach(ActivityLevel.allCases) { level in
+                        Text(level.displayName).tag(level)
+                    }
+                } selection: {
+                    $activity
+                }
             }
 
             if inferredGoalType == .maintain {
                 Text("Current and goal weight are close — we'll use maintenance calories.")
-                    .font(.caption)
+                    .font(OnboardingType.font(13, weight: .regular, relativeTo: .footnote))
                     .foregroundStyle(BrandTheme.homeSecondaryText)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.top, 4)
             }
         }
         .onAppear { updateHeightCm() }
+    }
+
+    private var aboutYouSexControl: some View {
+        HStack(spacing: 4) {
+            ForEach(Sex.allCases) { option in
+                let isSelected = sex == option
+                Button {
+                    sex = option
+                } label: {
+                    Text(option.rawValue.capitalized)
+                        .font(OnboardingType.font(15, weight: .semibold, relativeTo: .subheadline))
+                        .foregroundStyle(isSelected ? BrandTheme.homePrimaryText : BrandTheme.homeSecondaryText)
+                        .frame(maxWidth: .infinity)
+                        .frame(minHeight: 36)
+                        .background {
+                            if isSelected {
+                                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                    .fill(Color.white.opacity(0.12))
+                            }
+                        }
+                }
+                .buttonStyle(.plain)
+                .accessibilityAddTraits(isSelected ? .isSelected : [])
+            }
+        }
+        .padding(4)
+        .background(BrandTheme.homeCardSolid, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .strokeBorder(Color.white.opacity(0.08), lineWidth: 1)
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Sex")
+    }
+
+    private func aboutYouRow<Trailing: View>(_ title: String, @ViewBuilder trailing: () -> Trailing) -> some View {
+        HStack(spacing: 12) {
+            Text(title)
+                .font(OnboardingType.font(16, weight: .semibold, relativeTo: .body))
+                .foregroundStyle(BrandTheme.homePrimaryText)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 8)
+            trailing()
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
+        .frame(minHeight: 56)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(BrandTheme.homeCardSolid, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .strokeBorder(Color.white.opacity(0.08), lineWidth: 1)
+        }
+    }
+
+    private func aboutYouMenuPicker<Selection: Hashable, Content: View>(
+        label: String,
+        value: String,
+        accessibilityValue: String,
+        @ViewBuilder content: () -> Content,
+        selection: () -> Binding<Selection>
+    ) -> some View {
+        Picker(selection: selection()) {
+            content()
+        } label: {
+            HStack(spacing: 4) {
+                Text(value)
+                    .font(OnboardingType.font(16, weight: .semibold, relativeTo: .body))
+                    .foregroundStyle(BrandTheme.homePrimaryText)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(BrandTheme.teal)
+            }
+        }
+        .pickerStyle(.menu)
+        .tint(BrandTheme.homePrimaryText)
+        .accessibilityLabel(label)
+        .accessibilityValue(accessibilityValue)
     }
 
     private var planStep: some View {
@@ -311,6 +553,11 @@ struct OnboardingView: View {
                     .padding(.top, 14)
             }
 
+            planMetricRow(
+                title: "Diet",
+                value: diet.displayName,
+                subtitle: diet.macroHint
+            )
             planMetricRow(
                 title: "Current → goal",
                 value: "\(formatWeight(currentWeightKg)) → \(formatWeight(goalWeightKg))"
@@ -345,6 +592,10 @@ struct OnboardingView: View {
                 .font(.subheadline)
                 .foregroundStyle(BrandTheme.homeSecondaryText)
 
+            Text("On Today, tap calories to see this math. You can pull the goal up to 300 cal lower from there.")
+                .font(.caption)
+                .foregroundStyle(BrandTheme.homeSecondaryText)
+
             Text(plan.macroAdvice)
                 .font(.caption)
                 .foregroundStyle(BrandTheme.homeSecondaryText)
@@ -363,6 +614,92 @@ struct OnboardingView: View {
             RoundedRectangle(cornerRadius: 16)
                 .stroke(BrandTheme.purple.opacity(0.35), lineWidth: 1)
         )
+    }
+
+    private var progressPhotoStep: some View {
+        VStack(spacing: 8) {
+            Text("Optional. Snap a torso shot if you want a before pic. You can add photos later from the menu.")
+                .font(OnboardingType.font(15, weight: .regular, relativeTo: .subheadline))
+                .foregroundStyle(BrandTheme.homeSecondaryText)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: 340)
+                .padding(.bottom, 4)
+
+            Image(LarryPortrait.programPitch.assetName)
+                .resizable()
+                .scaledToFill()
+                .frame(width: 72, height: 72)
+                .clipShape(Circle())
+                .accessibilityLabel(LarryMcQuade.name)
+                .padding(.top, 4)
+
+            Text("Skip it. I won't ride you.")
+                .font(OnboardingType.font(16, weight: .medium, relativeTo: .callout).italic())
+                .foregroundStyle(BrandTheme.teal)
+                .multilineTextAlignment(.center)
+                .padding(.bottom, 8)
+
+            if let progressPreview {
+                Image(uiImage: progressPreview)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 240)
+                    .clipped()
+                    .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 20, style: .continuous)
+                            .strokeBorder(Color.white.opacity(0.10), lineWidth: 1)
+                    }
+            } else {
+                VStack(spacing: 8) {
+                    Image(systemName: "figure.arms.open")
+                        .font(.system(size: 32, weight: .medium))
+                        .foregroundStyle(BrandTheme.homeSecondaryText)
+                    Text("Same lighting, same pose, once a week is plenty. Stored only on this phone.")
+                        .font(OnboardingType.font(13, weight: .regular, relativeTo: .footnote))
+                        .foregroundStyle(BrandTheme.homeSecondaryText)
+                        .multilineTextAlignment(.center)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.horizontal, 20)
+                .padding(.vertical, 28)
+                .background(BrandTheme.homeCardSolid, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 20, style: .continuous)
+                        .strokeBorder(Color.white.opacity(0.08), lineWidth: 1)
+                }
+            }
+
+            Button {
+                showProgressCamera = true
+            } label: {
+                Label(progressPreview == nil ? "Take photo" : "Retake photo", systemImage: "camera.fill")
+                    .font(OnboardingType.font(17, weight: .semibold, relativeTo: .headline))
+                    .foregroundStyle(Color.white)
+                    .frame(maxWidth: .infinity)
+                    .frame(minHeight: 56)
+                    .background(Color.brandAccent, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            }
+            .buttonStyle(OnboardingPressStyle())
+            .padding(.top, 12)
+
+            PhotosPicker(selection: $progressPickerItem, matching: .images) {
+                Label("Choose from library", systemImage: "photo.on.rectangle")
+                    .font(OnboardingType.font(17, weight: .semibold, relativeTo: .headline))
+                    .foregroundStyle(BrandTheme.homePrimaryText)
+                    .frame(maxWidth: .infinity)
+                    .frame(minHeight: 54)
+                    .background(BrandTheme.homeCardSolid, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 16, style: .continuous)
+                            .strokeBorder(Color.white.opacity(0.08), lineWidth: 1)
+                    }
+            }
+            .buttonStyle(OnboardingPressStyle())
+        }
     }
 
     // MARK: - Helpers
@@ -424,6 +761,32 @@ struct OnboardingView: View {
             return "You can look jacked like me if you follow my \(rounded)-week program."
         }
         return "You can look jacked like me if you follow my program."
+    }
+
+    private func loadExistingProfileIfNeeded() {
+        guard !didLoadExistingProfile else { return }
+        didLoadExistingProfile = true
+        let descriptor = FetchDescriptor<UserSettings>()
+        guard let existing = (try? context.fetch(descriptor))?.first else { return }
+
+        sex = existing.sex
+        age = existing.age
+        usesImperial = existing.usesImperialUnits
+        currentWeightKg = existing.weightKg
+        goalWeightKg = existing.effectiveGoalWeightKg
+        activity = existing.activity
+        if existing.hasChosenDiet {
+            diet = existing.dietStyle
+        }
+        if let weekly = existing.weeklyLbChangeTarget {
+            weeklyLbChange = weekly
+            weeklyManuallySet = true
+        }
+
+        let totalInches = Int((existing.heightCm / 2.54).rounded())
+        heightFt = min(7, max(4, totalInches / 12))
+        heightIn = min(11, max(0, totalInches % 12))
+        heightCm = existing.heightCm
     }
 
     private func syncWeeklyIfNeeded() {
@@ -498,7 +861,7 @@ struct OnboardingView: View {
     private func advance() {
         if step < totalSteps - 1 {
             step += 1
-            if step == 3 { syncWeeklyIfNeeded() }
+            if step == 4 { syncWeeklyIfNeeded() }
         } else {
             finish()
         }
@@ -512,8 +875,14 @@ struct OnboardingView: View {
 
         do {
             try context.save()
+            TrackingCycleService.ensureStarted()
+            if let progressPreview {
+                _ = ProgressPhotoStore.shared.add(image: progressPreview, isBaseline: true)
+            }
             appState.hasCompletedOnboarding = true
-            appState.openLarryChatOnNextAppear = true
+            if appState.pendingChallengeToken == nil {
+                appState.openLarryChatOnNextAppear = true
+            }
         } catch {
             saveError = "Couldn't save your plan. Please try again."
         }
@@ -536,6 +905,7 @@ struct OnboardingView: View {
             usesImperialUnits: usesImperial,
             activity: activity,
             goalType: inferredGoalType,
+            dietStyle: diet,
             trainerVoice: LarryMcQuade.defaultVoice
         )
         context.insert(settings)
@@ -552,6 +922,7 @@ struct OnboardingView: View {
         settings.usesImperialUnits = usesImperial
         settings.activity = activity
         settings.goalType = inferredGoalType
+        settings.dietStyle = diet
         if settings.trainerVoice.isEmpty {
             settings.trainerVoice = LarryMcQuade.defaultVoice
         }

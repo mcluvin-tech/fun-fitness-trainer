@@ -37,6 +37,26 @@ struct ExercisePayload: Codable, Equatable {
         case caloriesBurned = "calories_burned"
         case durationMinutes = "duration_minutes"
     }
+
+    init(name: String, caloriesBurned: Double, durationMinutes: Double? = nil) {
+        self.name = name
+        self.caloriesBurned = caloriesBurned
+        self.durationMinutes = durationMinutes
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        name = try c.decode(String.self, forKey: .name)
+        caloriesBurned = FlexibleJSONNumber.double(c, .caloriesBurned)
+        durationMinutes = FlexibleJSONNumber.optionalDouble(c, .durationMinutes)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(name, forKey: .name)
+        try c.encode(caloriesBurned, forKey: .caloriesBurned)
+        try c.encodeIfPresent(durationMinutes, forKey: .durationMinutes)
+    }
 }
 
 enum ExerciseLogging {

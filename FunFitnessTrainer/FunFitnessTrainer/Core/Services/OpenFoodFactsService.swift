@@ -1,6 +1,7 @@
 import Foundation
+import os
 
-struct BarcodeProductResult: Equatable {
+struct BarcodeProductResult: Equatable, Sendable {
     let barcode: String
     let name: String
     let brand: String?
@@ -12,20 +13,83 @@ struct BarcodeProductResult: Equatable {
     let servingQuantityMl: Double?
 }
 
+/// UPC-A and the EAN-13 form AVFoundation returns for the same grocery barcode.
+enum BarcodeNormalization {
+    static func normalizedBarcode(_ rawValue: String) -> String {
+        let digits = rawValue.filter(\.isNumber)
+        if digits.count == 13, digits.hasPrefix("0") {
+            return String(digits.dropFirst())
+        }
+        return digits
+    }
+
+    /// Raw digits, the UPC-A form, and the EAN-13 form with a leading zero. Duplicates removed.
+    static func lookupCandidates(for rawValue: String) -> [String] {
+        let rawDigits = rawValue.filter(\.isNumber)
+        let normalized = normalizedBarcode(rawValue)
+        var candidates: [String] = []
+        func add(_ value: String) {
+            guard !value.isEmpty, !candidates.contains(value) else { return }
+            candidates.append(value)
+        }
+        add(rawDigits)
+        add(normalized)
+        if normalized.count == 12 {
+            add("0" + normalized)
+        }
+        return candidates
+    }
+}
+
 enum OpenFoodFactsService {
     private static let productURL = "https://world.openfoodfacts.org/api/v2/product"
     private static let searchURL = "https://world.openfoodfacts.org/cgi/search.pl"
-    private static let requestTimeout: TimeInterval = 2.5
+    /// Voice/text search stays short so chat stays snappy.
+    private static let searchTimeout: TimeInterval = 2.5
+    /// Direct barcode lookups tolerate slower cellular.
+    private static let barcodeLookupTimeout: TimeInterval = 12
     private static let searchCacheLimit = 40
     private static var searchCache: [String: BarcodeProductResult] = [:]
     private static var searchCacheOrder: [String] = []
 
-    static func lookup(barcode: String) async throws -> BarcodeProductResult {
+    static func lookup(barcode: String, timeout: TimeInterval = barcodeLookupTimeout) async throws -> BarcodeProductResult {
         let code = barcode.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !code.isEmpty else {
             throw APIError.serverMessage("Enter a valid barcode.")
         }
 
+        let candidates = BarcodeNormalization.lookupCandidates(for: code)
+        guard !candidates.isEmpty else {
+            throw APIError.serverMessage("Enter a valid barcode.")
+        }
+
+        var sawNetworkError = false
+        for variant in candidates {
+            do {
+                return try await lookupExact(code: variant, timeout: timeout)
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch is URLError {
+                sawNetworkError = true
+            } catch {
+                continue
+            }
+        }
+        for variant in candidates {
+            if let usda = try? await USDAFoodDataService.lookup(barcode: variant) {
+                return usda
+            }
+        }
+        let recognized = BarcodeNormalization.normalizedBarcode(code)
+        if sawNetworkError {
+            throw APIError.serverMessage("Barcode \(recognized) was read. The food database didn't respond.")
+        }
+        throw APIError.serverMessage(
+            "Barcode \(recognized) was read, but that product isn't in the database. Scan again."
+        )
+    }
+
+    private static func lookupExact(code: String, timeout: TimeInterval) async throws -> BarcodeProductResult {
         var components = URLComponents(string: "\(productURL)/\(code)")!
         components.queryItems = [
             URLQueryItem(
@@ -36,7 +100,7 @@ enum OpenFoodFactsService {
 
         guard let url = components.url else { throw APIError.invalidResponse }
 
-        let data = try await fetch(url: url)
+        let data = try await fetch(url: url, timeout: timeout)
         guard
             let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
             let status = json["status"] as? Int,
@@ -71,11 +135,21 @@ enum OpenFoodFactsService {
 
         guard let url = components.url else { return nil }
 
-        let data = try await fetch(url: url)
+        let data = try await fetch(url: url, timeout: searchTimeout)
         guard
             let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
             let products = json["products"] as? [[String: Any]]
-        else { return nil }
+        else {
+            // #region agent log
+            AgentDebugLog.emit(
+                hypothesisId: "D",
+                location: "OpenFoodFactsService.searchBestMatch",
+                message: "OFF response had no products array",
+                data: ["terms": terms]
+            )
+            // #endregion
+            return nil
+        }
 
         let queryTokens = tokenSet(terms)
         var best: (result: BarcodeProductResult, score: Double)?
@@ -96,7 +170,61 @@ enum OpenFoodFactsService {
         if let match = best?.result {
             storeCache(terms: terms, result: match)
         }
+        // #region agent log
+        AgentDebugLog.emit(
+            hypothesisId: "D",
+            location: "OpenFoodFactsService.searchBestMatch",
+            message: best == nil ? "no OFF product cleared score" : "OFF product selected",
+            data: [
+                "terms": terms,
+                "productCount": products.count,
+                "bestScore": best?.score ?? 0,
+                "bestName": best?.result.name ?? "",
+                "bestCalories": best?.result.perServing.calories ?? 0,
+                "bestProtein": best?.result.perServing.proteinG ?? 0,
+            ]
+        )
+        // #endregion
         return best?.result
+    }
+
+    /// Several label hits for the branded-food ranker. Empty when the search is down.
+    static func searchCandidates(query: String) async -> [BarcodeProductResult] {
+        let terms = normalizedSearchTerms(query)
+        guard !terms.isEmpty else { return [] }
+
+        var components = URLComponents(string: searchURL)!
+        components.queryItems = [
+            URLQueryItem(name: "search_terms", value: terms),
+            URLQueryItem(name: "search_simple", value: "1"),
+            URLQueryItem(name: "action", value: "process"),
+            URLQueryItem(name: "json", value: "1"),
+            URLQueryItem(name: "page_size", value: "15"),
+            URLQueryItem(
+                name: "fields",
+                value: "code,product_name,brands,nutriments,serving_size,serving_quantity,image_url"
+            ),
+        ]
+        guard let url = components.url else { return [] }
+
+        do {
+            let data = try await fetch(url: url, timeout: 8)
+            guard
+                let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                let products = json["products"] as? [[String: Any]]
+            else { return [] }
+
+            var results: [BarcodeProductResult] = []
+            for product in products {
+                guard let code = product["code"] as? String, !code.isEmpty,
+                      let parsed = parseProduct(product, barcode: code),
+                      parsed.perServing.calories > 0 else { continue }
+                results.append(parsed)
+            }
+            return results
+        } catch {
+            return []
+        }
     }
 
     private static func cachedMatch(for terms: String) -> BarcodeProductResult? {
@@ -120,10 +248,10 @@ enum OpenFoodFactsService {
 
     static func parseProduct(_ product: [String: Any], barcode: String) -> BarcodeProductResult? {
         let nutriments = product["nutriments"] as? [String: Any] ?? [:]
-        let servingQuantity = doubleValue(product["serving_quantity"]) ?? 100
-        let perServing = macros(from: nutriments, servingQuantityGrams: servingQuantity)
+        let servingQuantity = resolvedServingAmount(product: product, nutriments: nutriments)
+        let perServing = macros(from: nutriments, product: product, servingAmount: servingQuantity)
 
-        guard perServing.calories > 0 else { return nil }
+        guard perServing.calories >= 0 else { return nil }
 
         let productName = (product["product_name"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
         let brand = (product["brands"] as? String)?
@@ -208,32 +336,79 @@ enum OpenFoodFactsService {
             return servingQuantity > 0 ? servingQuantity : nil
         }
         if let desc = servingDescription?.lowercased() {
-            if desc.contains("ml"), let ml = parseLeadingNumber(in: desc) { return ml }
-            if desc.contains("fl oz") || desc.contains("oz"), let oz = parseLeadingNumber(in: desc) {
-                return oz * 29.5735
+            if let ml = numberBeforeUnit(desc, unit: #"(?:ml|milliliters?|millilitres?)\b"#) {
+                return ml
+            }
+            if desc.contains("fl oz") || desc.contains("fluid"),
+               let oz = numberBeforeUnit(desc, unit: #"(?:fl\.?\s*oz|fluid\s*ounces?)\b"#) {
+                return oz * FoodUnit.mlPerFluidOunce
             }
         }
-        if servingQuantity > 0, servingQuantity < 500 { return servingQuantity }
+        let unit = (nutriments["serving_size_unit"] as? String ?? "").lowercased()
+        if unit.contains("ml"), servingQuantity > 0 { return servingQuantity }
         return nil
     }
 
-    private static func parseLeadingNumber(in text: String) -> Double? {
-        guard let regex = try? NSRegularExpression(pattern: #"(\d+(?:\.\d+)?)"#),
+    /// Grams or milliliters in one label serving. "28 g" wins over a missing quantity, and over a count of 1.
+    private static func resolvedServingAmount(product: [String: Any], nutriments: [String: Any]) -> Double {
+        let described = servingAmount(from: product["serving_size"] as? String)
+        let quantity = doubleValue(product["serving_quantity"])
+        if let described, let quantity {
+            // serving_quantity is sometimes a count ("1" or "12" fl oz) while the label states grams or ml.
+            if quantity <= 32, described > quantity * 3 { return described }
+            return quantity
+        }
+        if let described { return described }
+        if let quantity, quantity > 0 { return quantity }
+        _ = nutriments
+        return 100
+    }
+
+    private static func servingAmount(from servingSize: String?) -> Double? {
+        guard let text = servingSize?.lowercased(), !text.isEmpty else { return nil }
+        if let grams = numberBeforeUnit(text, unit: #"(?:grams?|g)\b"#) { return grams }
+        if let ml = numberBeforeUnit(text, unit: #"(?:ml|milliliters?|millilitres?)\b"#) { return ml }
+        if let oz = numberBeforeUnit(text, unit: #"(?:fl\.?\s*oz|fluid\s*ounces?)\b"#) {
+            return oz * FoodUnit.mlPerFluidOunce
+        }
+        if text.contains("oz"), !text.contains("fl"), let oz = numberBeforeUnit(text, unit: #"(?:ounces?|oz)\b"#) {
+            return oz * FoodUnit.gramsPerOunce
+        }
+        return nil
+    }
+
+    private static func numberBeforeUnit(_ text: String, unit: String) -> Double? {
+        guard let regex = try? NSRegularExpression(pattern: #"(\d+(?:\.\d+)?)\s*"# + unit, options: .caseInsensitive),
               let match = regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)),
               let range = Range(match.range(at: 1), in: text) else { return nil }
         return Double(text[range])
     }
 
-    private static func fetch(url: URL) async throws -> Data {
-        var request = URLRequest(url: url)
-        request.timeoutInterval = requestTimeout
-        request.setValue("FunFitnessTrainer/1.0 (iOS; macro tracker)", forHTTPHeaderField: "User-Agent")
-        let (data, response) = try await URLSession.shared.data(for: request)
-        guard let http = response as? HTTPURLResponse else { throw APIError.invalidResponse }
-        guard (200...299).contains(http.statusCode) else {
-            throw APIError.httpError(http.statusCode)
+    private static func fetch(url: URL, timeout: TimeInterval = searchTimeout) async throws -> Data {
+        var lastError: Error?
+        for attempt in 1...2 {
+            do {
+                var request = URLRequest(url: url)
+                request.timeoutInterval = timeout
+                request.setValue("FunFitnessTrainer/1.0 (iOS; macro tracker)", forHTTPHeaderField: "User-Agent")
+                let (data, response) = try await URLSession.shared.data(for: request)
+                guard let http = response as? HTTPURLResponse else { throw APIError.invalidResponse }
+                guard (200...299).contains(http.statusCode) else {
+                    throw APIError.httpError(http.statusCode)
+                }
+                return data
+            } catch let error as URLError where [
+                .networkConnectionLost, .timedOut, .notConnectedToInternet,
+                .cannotConnectToHost, .cannotFindHost, .dnsLookupFailed,
+            ].contains(error.code) {
+                lastError = error
+                if attempt == 1 {
+                    try? await Task.sleep(nanoseconds: 500_000_000)
+                    continue
+                }
+            }
         }
-        return data
+        throw lastError ?? APIError.invalidResponse
     }
 
     private static func displayName(productName: String?, brand: String?) -> String {
@@ -241,57 +416,110 @@ enum OpenFoodFactsService {
         let cleanBrand = brand?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
 
         if !cleanBrand.isEmpty, !cleanName.isEmpty {
-            return "\(cleanBrand) — \(cleanName)"
+            return "\(cleanBrand), \(cleanName)"
         }
         if !cleanName.isEmpty { return cleanName }
         if !cleanBrand.isEmpty { return cleanBrand }
         return "Packaged food"
     }
 
-    private static func macros(from nutriments: [String: Any], servingQuantityGrams: Double) -> MacroTotals {
+    private static func macros(
+        from nutriments: [String: Any],
+        product: [String: Any],
+        servingAmount: Double
+    ) -> MacroTotals {
+        let basis = (
+            (nutriments["nutrition_data_per"] as? String)
+            ?? (product["nutrition_data_per"] as? String)
+            ?? ""
+        ).lowercased()
+        let perServingBasis = basis.contains("serving")
+
         if let serving = servingMacros(from: nutriments) {
             return serving
         }
-        return scaledFrom100g(nutriments: nutriments, servingQuantityGrams: servingQuantityGrams)
+
+        if perServingBasis {
+            let raw = unsuffixedMacros(nutriments)
+            if raw.calories > 0 || raw.proteinG + raw.carbsG + raw.fatG > 0 {
+                return raw
+            }
+        }
+
+        return scaledFrom100g(
+            nutriments: nutriments,
+            servingAmount: servingAmount,
+            includeUnsuffixed: !perServingBasis
+        )
     }
 
     private static func servingMacros(from nutriments: [String: Any]) -> MacroTotals? {
-        let calories = nutrient(nutriments, keys: ["energy-kcal_serving", "energy-kcal"])
-        guard calories > 0 else { return nil }
+        let protein = nutrient(nutriments, keys: ["proteins_serving"])
+        let carbs = nutrient(nutriments, keys: ["carbohydrates_serving"])
+        let fat = nutrient(nutriments, keys: ["fat_serving"])
+        let kcal = doubleValue(nutriments["energy-kcal_serving"])
+        let kj = doubleValue(nutriments["energy-kj_serving"]) ?? doubleValue(nutriments["energy_serving"])
+        guard kcal != nil || kj != nil else { return nil }
 
-        return MacroTotals(
-            calories: calories,
-            proteinG: nutrient(nutriments, keys: ["proteins_serving", "proteins"]),
-            carbsG: nutrient(nutriments, keys: ["carbohydrates_serving", "carbohydrates"]),
-            fatG: nutrient(nutriments, keys: ["fat_serving", "fat"])
+        let calories = MacroTrackingEngine.normalizedEnergy(
+            reportedCalories: kcal ?? 0,
+            kilojoules: kj,
+            proteinG: protein,
+            carbsG: carbs,
+            fatG: fat
         )
+        // A zero kcal field with real macros is a missing value, not a diet soda.
+        if calories == 0, protein + carbs + fat > 0 { return nil }
+        return MacroTotals(calories: calories, proteinG: protein, carbsG: carbs, fatG: fat)
+    }
+
+    private static func unsuffixedMacros(_ nutriments: [String: Any]) -> MacroTotals {
+        let protein = nutrient(nutriments, keys: ["proteins"])
+        let carbs = nutrient(nutriments, keys: ["carbohydrates"])
+        let fat = nutrient(nutriments, keys: ["fat"])
+        let calories = MacroTrackingEngine.normalizedEnergy(
+            reportedCalories: doubleValue(nutriments["energy-kcal"]) ?? 0,
+            kilojoules: doubleValue(nutriments["energy-kj"]) ?? doubleValue(nutriments["energy"]),
+            proteinG: protein,
+            carbsG: carbs,
+            fatG: fat
+        )
+        return MacroTotals(calories: calories, proteinG: protein, carbsG: carbs, fatG: fat)
     }
 
     private static func scaledFrom100g(
         nutriments: [String: Any],
-        servingQuantityGrams: Double
+        servingAmount: Double,
+        includeUnsuffixed: Bool
     ) -> MacroTotals {
-        let factor = max(servingQuantityGrams, 1) / 100.0
-        let calories = nutrient(nutriments, keys: ["energy-kcal_100g", "energy-kcal"]) * factor
-
-        if calories <= 0 {
-            let kj = nutrient(nutriments, keys: ["energy-kj_100g", "energy-kj"]) * factor
-            if kj > 0 {
-                return MacroTotals(
-                    calories: kj / 4.184,
-                    proteinG: nutrient(nutriments, keys: ["proteins_100g", "proteins"]) * factor,
-                    carbsG: nutrient(nutriments, keys: ["carbohydrates_100g", "carbohydrates"]) * factor,
-                    fatG: nutrient(nutriments, keys: ["fat_100g", "fat"]) * factor
-                )
-            }
+        let factor = max(servingAmount, 1) / 100.0
+        var kcalKeys = ["energy-kcal_100g", "energy-kcal_100ml"]
+        var kjKeys = ["energy-kj_100g", "energy-kj_100ml", "energy_100g", "energy_100ml"]
+        var proteinKeys = ["proteins_100g", "proteins_100ml"]
+        var carbKeys = ["carbohydrates_100g", "carbohydrates_100ml"]
+        var fatKeys = ["fat_100g", "fat_100ml"]
+        if includeUnsuffixed {
+            kcalKeys.append("energy-kcal")
+            kjKeys.append("energy-kj")
+            kjKeys.append("energy")
+            proteinKeys.append("proteins")
+            carbKeys.append("carbohydrates")
+            fatKeys.append("fat")
         }
 
-        return MacroTotals(
-            calories: calories,
-            proteinG: nutrient(nutriments, keys: ["proteins_100g", "proteins"]) * factor,
-            carbsG: nutrient(nutriments, keys: ["carbohydrates_100g", "carbohydrates"]) * factor,
-            fatG: nutrient(nutriments, keys: ["fat_100g", "fat"]) * factor
+        let protein = nutrient(nutriments, keys: proteinKeys) * factor
+        let carbs = nutrient(nutriments, keys: carbKeys) * factor
+        let fat = nutrient(nutriments, keys: fatKeys) * factor
+        let kcal = nutrient(nutriments, keys: kcalKeys) * factor
+        let kj = nutrient(nutriments, keys: kjKeys) * factor
+        let calories = MacroTrackingEngine.normalizedEnergy(
+            reportedCalories: kcal,
+            kilojoules: kj > 0 ? kj : nil,
+            proteinG: protein,
+            carbsG: carbs,
+            fatG: fat
         )
+        return MacroTotals(calories: calories, proteinG: protein, carbsG: carbs, fatG: fat)
     }
 
     private static func nutrient(_ nutriments: [String: Any], keys: [String]) -> Double {
@@ -310,5 +538,689 @@ enum OpenFoodFactsService {
         case let text as String: return Double(text.trimmingCharacters(in: .whitespacesAndNewlines))
         default: return nil
         }
+    }
+}
+
+struct USDAPortion {
+    var modifier: String
+    var amount: Double
+    var gramWeight: Double
+}
+
+struct USDABrandedServing: Equatable {
+    var name: String
+    var brand: String?
+    var perServing: MacroTotals
+    var servingDescription: String?
+    var barcode: String?
+    var servingGrams: Double?
+}
+
+struct USDAGenericFood: Sendable {
+    var name: String
+    var dataType: String
+    /// Nutrients for 100 grams.
+    var per100g: MacroTotals
+    var grams: Double
+    var quantity: Double
+    var unit: String
+    var portionLabel: String
+    var assumedPortion: Bool
+}
+
+/// USDA FoodData Central lookup. Barcodes use branded foods; unnamed foods use Foundation / SR Legacy.
+enum USDAFoodDataService {
+    private static let searchURL = "https://api.nal.usda.gov/fdc/v1/foods/search"
+    /// Public demo key. About 30 requests per hour and 50 per day, per IP.
+    /// A real key comes from the `USDA_API_KEY` environment variable, Info.plist
+    /// (an xcconfig or build setting fills `$(USDA_API_KEY)`), or Secrets.plist.
+    private static let demoKey = "DEMO_KEY"
+    private static let rateLimitedUntil = OSAllocatedUnfairLock(initialState: Date.distantPast)
+
+    /// Key the live requests will send. Blank, `DEMO_KEY`, and `YOUR_…` placeholders are ignored.
+    static var apiKey: String {
+        let candidates: [String?] = [
+            ProcessInfo.processInfo.environment["USDA_API_KEY"],
+            Bundle.main.object(forInfoDictionaryKey: "USDA_API_KEY") as? String,
+            Secrets.value(for: "USDA_API_KEY"),
+        ]
+        for candidate in candidates {
+            guard let key = candidate?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  isUsableAPIKey(key) else { continue }
+            return key
+        }
+        return demoKey
+    }
+
+    static var isUsingDemoKey: Bool { apiKey == demoKey }
+
+    /// Known foods skip the demo key so a 429 cannot wipe a tablespoon of honey.
+    /// A test double always runs. A real key runs outside XCTest, then falls back to the table.
+    static func shouldQueryBeforeStaple() -> Bool {
+        if genericLookupForTests != nil { return true }
+        if isRunningUnderXCTest { return false }
+        return !isUsingDemoKey
+    }
+
+    private static var isRunningUnderXCTest: Bool {
+        let environment = ProcessInfo.processInfo.environment
+        return environment["XCTestConfigurationFilePath"] != nil
+            || environment["XCTestSessionIdentifier"] != nil
+    }
+
+    private static func isUsableAPIKey(_ key: String) -> Bool {
+        if key.isEmpty || key == demoKey { return false }
+        if key.hasPrefix("$(") { return false }
+        if key.contains("YOUR_") { return false }
+        return true
+    }
+
+    static func lookup(barcode: String) async throws -> BarcodeProductResult? {
+        let digits = barcode.filter(\.isNumber)
+        guard !digits.isEmpty else { return nil }
+        let key = apiKey
+
+        var components = URLComponents(string: searchURL)!
+        components.queryItems = [
+            URLQueryItem(name: "query", value: digits),
+            URLQueryItem(name: "dataType", value: "Branded"),
+            URLQueryItem(name: "pageSize", value: "15"),
+            URLQueryItem(name: "api_key", value: key),
+        ]
+        guard let url = components.url else { return nil }
+
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 12
+        request.setValue("FunFitnessTrainer/1.0 (iOS; macro tracker)", forHTTPHeaderField: "User-Agent")
+        if rateLimitIsActive() { return nil }
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse else { return nil }
+        if recordRateLimit(http) { return nil }
+        guard (200...299).contains(http.statusCode) else {
+            return nil
+        }
+        guard
+            let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let foods = json["foods"] as? [[String: Any]]
+        else { return nil }
+
+        for food in foods {
+            let gtin = ((food["gtinUpc"] as? String) ?? "").filter(\.isNumber)
+            guard OpenFoodFactsBarcode.sameProduct(gtin, digits) else { continue }
+            if let parsed = parse(food, barcode: gtin.isEmpty ? digits : gtin) {
+                return parsed
+            }
+        }
+        return nil
+    }
+
+    /// Tests install this so a generic-food lookup does not call the USDA API.
+    static var genericLookupForTests: (@Sendable (String) async -> USDAGenericFood?)?
+
+    /// Foundation / SR Legacy name search. Known pantry foods can skip this on DEMO_KEY.
+    /// "raw honey" must not match every SR Legacy row that merely ends in ", raw".
+    static func lookupGeneric(query: String) async -> USDAGenericFood? {
+        if let genericLookupForTests {
+            return await genericLookupForTests(query)
+        }
+        let terms = genericSearchTerms(from: query)
+        guard !terms.isEmpty else { return nil }
+        let tokens = wordTokens(terms)
+        // #region agent log
+        AgentDebugLog.emit(
+            hypothesisId: "B",
+            location: "USDAFoodDataService.lookupGeneric",
+            message: "USDA search terms",
+            data: [
+                "query": query,
+                "terms": terms,
+                "tokens": tokens.joined(separator: " "),
+            ]
+        )
+        // #endregion
+        guard !tokens.isEmpty else { return nil }
+
+        guard let foods = await searchFoods(query: terms, dataTypes: "Foundation,SR Legacy", pageSize: 15) else {
+            // #region agent log
+            AgentDebugLog.emit(
+                hypothesisId: "B",
+                location: "USDAFoodDataService.lookupGeneric",
+                message: "USDA search failed",
+                data: ["terms": terms, "runId": "post-fix"]
+            )
+            // #endregion
+            return nil
+        }
+
+        var best: (food: [String: Any], score: Double)?
+        for food in foods {
+            let description = (food["description"] as? String) ?? ""
+            let score = genericMatchScore(description: description, queryTokens: tokens)
+            guard score >= 0.85 else { continue }
+            if best == nil || score > best!.score {
+                best = (food, score)
+            }
+        }
+
+        guard let match = best else {
+            let preview = foods.prefix(5).map { food -> String in
+                let description = (food["description"] as? String) ?? ""
+                let score = genericMatchScore(description: description, queryTokens: tokens)
+                return "\(description)|\(score)"
+            }.joined(separator: " || ")
+            // #region agent log
+            AgentDebugLog.emit(
+                hypothesisId: "B",
+                location: "USDAFoodDataService.lookupGeneric",
+                message: "no USDA description matched the food name",
+                data: [
+                    "terms": terms,
+                    "tokens": tokens.joined(separator: " "),
+                    "candidates": foods.count,
+                    "top": preview,
+                ]
+            )
+            // #endregion
+            return nil
+        }
+
+        let description = ((match.food["description"] as? String) ?? terms)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let per100g = per100gMacros(from: match.food)
+        guard per100g.calories > 0 else { return nil }
+
+        var portions: [USDAPortion] = []
+        if let id = intValue(match.food["fdcId"]), let detail = await foodDetail(fdcId: id) {
+            portions = parsedPortions(from: detail)
+        }
+        let serving = scaledServing(userQuery: query, portions: portions)
+        return USDAGenericFood(
+            name: description,
+            dataType: (match.food["dataType"] as? String) ?? "USDA",
+            per100g: per100g,
+            grams: serving.grams,
+            quantity: serving.quantity,
+            unit: serving.unit,
+            portionLabel: serving.label,
+            assumedPortion: serving.assumed
+        )
+    }
+
+    private static func genericSearchTerms(from query: String) -> String {
+        let cleaned = FoodItemNaming.sanitizeSegment(query)
+        let source = cleaned.isEmpty ? query : cleaned
+        let ignored: Set<String> = [
+            "raw", "cooked", "uncooked", "grilled", "baked", "roasted", "fried",
+            "boiled", "steamed", "fresh", "organic", "plain", "homemade", "leftover",
+            "pint", "pints", "glass", "glasses", "bottle", "bottles", "can", "cans",
+            "shot", "shots", "ounce", "ounces", "cup", "cups",
+            "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+            "tablespoon", "tablespoons", "teaspoon", "teaspoons", "tbsp", "tsp",
+            "of", "a", "an", "some",
+        ]
+        return wordTokens(source)
+            .filter { !ignored.contains($0) }
+            .joined(separator: " ")
+    }
+
+    /// Primary name must be the food itself. "Honey" matches; "Honey Bunches of Oats" and "Abiyuch, raw" do not.
+    private static func genericMatchScore(description: String, queryTokens: [String]) -> Double {
+        let lower = description.lowercased()
+        let primary = lower.split(separator: ",").first
+            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) } ?? lower
+        let primaryTokens = wordTokens(primary)
+        if !queryTokens.allSatisfy({ wholeWord($0, in: primary) }) {
+            let segments = lower.split(separator: ",").map {
+                String($0).trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            let exactSegment = segments.contains { wordTokens($0) == queryTokens }
+            return exactSegment ? 0.9 : 0
+        }
+        if primaryTokens == queryTokens { return 1 }
+        let extras = primaryTokens.filter { !queryTokens.contains($0) }
+        if extras.isEmpty { return 0.95 }
+        return max(0, 0.7 - Double(extras.count) * 0.2)
+    }
+
+    private static func scaledServing(
+        userQuery: String,
+        portions: [USDAPortion]
+    ) -> (grams: Double, quantity: Double, unit: String, label: String, assumed: Bool) {
+        let portion = FoodQuantity.parse(from: userQuery)
+        if portion.unit.isMass, let grams = portion.unit.toGrams(portion.amount), grams > 0 {
+            let unit = portion.unit.displayName
+            return (grams, portion.amount, unit, "\(formatAmount(portion.amount)) \(unit)", false)
+        }
+        if let hit = matchingPortion(portion, in: portions) {
+            let grams = hit.gramWeight * portion.amount / max(hit.amount, 0.01)
+            return (grams, portion.amount, portion.unit.displayName, hit.modifier, false)
+        }
+        // Empty food-detail portions used to treat 1 tablespoon as 100 g (or as 15 ml).
+        // Honey's tablespoon is 21 g. Use the bundled weight before any generic fallback.
+        if let grams = StapleNutritionDatabase.householdGrams(in: userQuery), grams > 0 {
+            let unit = portion.unit.displayName
+            let label = "\(formatAmount(portion.amount)) \(unit)"
+            return (grams, portion.amount, unit.isEmpty ? "g" : unit, label, false)
+        }
+        if portion.unit.isVolume, let ml = portion.unit.toMilliliters(portion.amount), ml > 0 {
+            let label = "\(formatAmount(portion.amount)) \(portion.unit.displayName)"
+            return (ml, portion.amount, portion.unit.displayName, label, false)
+        }
+        if portion.unit.isCountable {
+            let preference = [
+                "medium", "piece", "serving", "slice", "fruit", "fillet",
+                "tbsp", "tablespoon", "tsp", "teaspoon", "packet", "oz", "cup",
+            ]
+            for key in preference {
+                guard let hit = portions.first(where: { $0.modifier.lowercased().contains(key) }) else { continue }
+                let grams = hit.gramWeight * max(portion.amount, 1) / max(hit.amount, 0.01)
+                let unit = displayUnit(for: key)
+                return (grams, max(portion.amount, 1), unit, "\(formatAmount(max(portion.amount, 1))) \(unit)", true)
+            }
+        }
+        let grams = 100 * max(portion.amount, 1)
+        return (grams, max(portion.amount, 1), "g", "100 g", true)
+    }
+
+    private static func matchingPortion(_ portion: FoodPortion, in portions: [USDAPortion]) -> USDAPortion? {
+        let keys: [String]
+        switch portion.unit {
+        case .tablespoon: keys = ["tbsp", "tablespoon"]
+        case .teaspoon: keys = ["tsp", "teaspoon"]
+        case .cup: keys = ["cup"]
+        case .slice: keys = ["slice"]
+        case .ounce: keys = ["oz", "ounce"]
+        default: return nil
+        }
+        return portions.first { item in
+            let modifier = item.modifier.lowercased()
+            return keys.contains { modifier.contains($0) }
+        }
+    }
+
+    private static func displayUnit(for key: String) -> String {
+        switch key {
+        case "tbsp", "tablespoon": return "tbsp"
+        case "tsp", "teaspoon": return "tsp"
+        case "slice": return "slice"
+        case "cup": return "cup"
+        case "oz": return "oz"
+        default: return "serving"
+        }
+    }
+
+    private static func formatAmount(_ amount: Double) -> String {
+        amount == floor(amount) ? String(Int(amount)) : String(format: "%g", amount)
+    }
+
+    /// Spoken "one tablespoon" applied to USDA per-100 g data.
+    /// A missing portion list must not keep the 100 g fallback when we know the food's tablespoon.
+    static func applyingHouseholdMeasure(_ food: USDAGenericFood, query: String) -> USDAGenericFood {
+        guard let grams = StapleNutritionDatabase.householdGrams(in: query), grams > 0 else {
+            return food
+        }
+        let portion = FoodQuantity.parse(from: query)
+        var measured = food
+        measured.grams = grams
+        measured.quantity = portion.amount
+        let unit = portion.unit.displayName
+        if !unit.isEmpty {
+            measured.unit = unit
+        }
+        measured.portionLabel = FoodQuantity.describe(portion)
+        measured.assumedPortion = false
+        return measured
+    }
+
+    private static func searchFoods(query: String, dataTypes: String, pageSize: Int) async -> [[String: Any]]? {
+        let key = apiKey
+        var components = URLComponents(string: searchURL)!
+        components.queryItems = [
+            URLQueryItem(name: "query", value: query),
+            URLQueryItem(name: "dataType", value: dataTypes),
+            URLQueryItem(name: "pageSize", value: String(pageSize)),
+            URLQueryItem(name: "api_key", value: key),
+        ]
+        guard let json = await getJSON(components.url) else { return nil }
+        return json["foods"] as? [[String: Any]]
+    }
+
+    private static func foodDetail(fdcId: Int) async -> [String: Any]? {
+        let key = apiKey
+        var components = URLComponents(string: "https://api.nal.usda.gov/fdc/v1/food/\(fdcId)")!
+        components.queryItems = [URLQueryItem(name: "api_key", value: key)]
+        return await getJSON(components.url)
+    }
+
+    private static func getJSON(_ url: URL?) async -> [String: Any]? {
+        guard let url, !rateLimitIsActive() else { return nil }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 10
+        request.setValue("FunFitnessTrainer/1.0 (iOS; macro tracker)", forHTTPHeaderField: "User-Agent")
+        guard
+            let (data, response) = try? await URLSession.shared.data(for: request),
+            let http = response as? HTTPURLResponse
+        else { return nil }
+        if recordRateLimit(http) { return nil }
+        guard
+            (200...299).contains(http.statusCode),
+            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return nil }
+        return json
+    }
+
+    /// 429 is a miss, not a crash. Later foods use the bundled table until the window passes.
+    private static func rateLimitIsActive() -> Bool {
+        rateLimitedUntil.withLock { $0 > Date() }
+    }
+
+    private static func recordRateLimit(_ http: HTTPURLResponse) -> Bool {
+        guard http.statusCode == 429 else { return false }
+        let header = http.value(forHTTPHeaderField: "Retry-After").flatMap { Double($0) }
+        let seconds = min(max(header ?? 60 * 60, 30), 60 * 60)
+        let until = Date().addingTimeInterval(seconds)
+        rateLimitedUntil.withLock { current in
+            if until > current { current = until }
+        }
+        AgentDebugLog.emit(
+            hypothesisId: "B",
+            location: "USDAFoodDataService.recordRateLimit",
+            message: "USDA returned 429",
+            data: ["retryAfter": seconds]
+        )
+        return true
+    }
+
+    private static func parsedPortions(from food: [String: Any]) -> [USDAPortion] {
+        let rows = food["foodPortions"] as? [[String: Any]] ?? []
+        return rows.compactMap { row in
+            guard let grams = doubleValue(row["gramWeight"]), grams > 0 else { return nil }
+            let modifier = ((row["modifier"] as? String) ?? (row["portionDescription"] as? String) ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let amount = doubleValue(row["amount"]) ?? 1
+            return USDAPortion(modifier: modifier, amount: max(amount, 0.01), gramWeight: grams)
+        }
+    }
+
+    private static func per100gMacros(from food: [String: Any]) -> MacroTotals {
+        let nutrients = food["foodNutrients"] as? [[String: Any]] ?? []
+        let totals = MacroTotals(
+            calories: nutrientAmount(nutrients, ids: [1008], names: ["energy"], energy: true),
+            proteinG: nutrientAmount(nutrients, ids: [1003], names: ["protein"]),
+            carbsG: nutrientAmount(nutrients, ids: [1005], names: ["carbohydrate"]),
+            fatG: nutrientAmount(nutrients, ids: [1004], names: ["total lipid", "fat"])
+        )
+        let serving = doubleValue(food["servingSize"]) ?? 100
+        let unit = ((food["servingSizeUnit"] as? String) ?? "g").lowercased()
+        guard unit == "g" || unit == "grm" || unit.isEmpty, serving > 0, abs(serving - 100) > 0.5 else {
+            return totals
+        }
+        return totals.scaled(by: 100 / serving)
+    }
+
+    private static func nutrientAmount(
+        _ nutrients: [[String: Any]],
+        ids: Set<Int>,
+        names: [String],
+        energy: Bool = false
+    ) -> Double {
+        var kcal: Double?
+        var kilojoules: Double?
+        var matched: Double?
+        for nutrient in nutrients {
+            let id = intValue(nutrient["nutrientId"])
+                ?? intValue(nutrient["nutrientNumber"])
+                ?? (nutrient["nutrient"] as? [String: Any]).flatMap { intValue($0["id"]) }
+            let name = (nutrient["nutrientName"] as? String
+                ?? (nutrient["nutrient"] as? [String: Any])?["name"] as? String
+                ?? "").lowercased()
+            let unit = (nutrient["unitName"] as? String
+                ?? (nutrient["nutrient"] as? [String: Any])?["unitName"] as? String
+                ?? "").lowercased()
+            let matchesID = id.map { ids.contains($0) } ?? false
+            let matchesName = names.contains { name.contains($0) }
+            guard matchesID || matchesName else { continue }
+            if energy, name.contains("from") { continue }
+            if !matchesID, name.contains("saturated") || name.contains("trans") { continue }
+            guard let value = doubleValue(nutrient["value"]) ?? doubleValue(nutrient["amount"]) else { continue }
+            if energy {
+                if id == 1008 || unit.contains("kcal") { kcal = value }
+                else if unit.contains("kj") { kilojoules = value }
+                else if matched == nil { matched = value }
+            } else if matched == nil {
+                matched = value
+            }
+        }
+        if energy {
+            if let kcal, kcal > 0 { return kcal }
+            if let kilojoules, kilojoules > 0 { return kilojoules / 4.184 }
+        }
+        return matched ?? 0
+    }
+
+    private static func wordTokens(_ text: String) -> [String] {
+        text.lowercased()
+            .components(separatedBy: CharacterSet.letters.inverted)
+            .filter { $0.count >= 3 }
+    }
+
+    private static func wholeWord(_ token: String, in text: String) -> Bool {
+        guard let regex = try? NSRegularExpression(
+            pattern: "\\b\(NSRegularExpression.escapedPattern(for: token))\\b",
+            options: .caseInsensitive
+        ) else { return false }
+        return regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)) != nil
+    }
+
+    private static func intValue(_ value: Any?) -> Int? {
+        switch value {
+        case let number as Int: return number
+        case let number as Double: return Int(number)
+        case let text as String: return Int(text)
+        default: return nil
+        }
+    }
+
+    private static func doubleValue(_ value: Any?) -> Double? {
+        switch value {
+        case let number as Double: return number
+        case let number as Int: return Double(number)
+        case let text as String: return Double(text)
+        default: return nil
+        }
+    }
+
+    /// Branded-food text search. Nutrients in this response are per 100 g, so they are scaled by the label serving.
+    /// A missing `USDA_API_KEY` uses the public demo key. Failure returns an empty list.
+    static func searchBranded(query: String) async -> [USDABrandedServing] {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return [] }
+        let cleaned = trimmed.replacingOccurrences(of: "\"", with: "")
+        let quoted = cleaned.contains(" ") ? "\"\(cleaned)\"" : cleaned
+        guard let foods = await postFoodSearch(query: quoted, dataTypes: ["Branded"], pageSize: 25) else {
+            return []
+        }
+        var servings: [USDABrandedServing] = []
+        for food in foods {
+            if let serving = brandedServing(fromSearchFood: food) {
+                servings.append(serving)
+            }
+        }
+        return servings
+    }
+
+    /// Search-result nutrients are per 100 g. Returns one label serving, or nil when the serving size is missing.
+    static func brandedServing(fromSearchFood food: [String: Any]) -> USDABrandedServing? {
+        let nutrients = food["foodNutrients"] as? [[String: Any]] ?? []
+        let per100g = MacroTotals(
+            calories: nutrientAmount(nutrients, ids: [1008], names: ["energy"], energy: true),
+            proteinG: nutrientAmount(nutrients, ids: [1003], names: ["protein"]),
+            carbsG: nutrientAmount(nutrients, ids: [1005], names: ["carbohydrate"]),
+            fatG: nutrientAmount(nutrients, ids: [1004], names: ["total lipid", "fat"])
+        )
+        guard per100g.calories > 0 else { return nil }
+
+        let serving = doubleValue(food["servingSize"]) ?? 0
+        let unit = ((food["servingSizeUnit"] as? String) ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        let isMass = unit == "g" || unit == "grm" || unit == "gram" || unit == "grams"
+        let isVolume = unit == "ml" || unit == "mlt" || unit == "milliliter" || unit == "milliliters"
+        guard (isMass || isVolume), serving > 0, serving < 800 else { return nil }
+
+        let scaled = per100g.scaled(by: serving / 100)
+        let calories = MacroTrackingEngine.normalizedEnergy(
+            reportedCalories: scaled.calories,
+            proteinG: scaled.proteinG,
+            carbsG: scaled.carbsG,
+            fatG: scaled.fatG
+        )
+        guard calories > 0 else { return nil }
+
+        let description = ((food["description"] as? String) ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let primary = description.split(separator: ",").first
+            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) } ?? description
+        let consumerBrand = trimmedText(food["brandName"])
+        let owner = trimmedText(food["brandOwner"])
+        let brand = (consumerBrand?.isEmpty == false) ? consumerBrand : owner
+        let name: String
+        if let brand, !brand.isEmpty, !primary.isEmpty, !primary.lowercased().contains(brand.lowercased()) {
+            name = "\(brand) \(primary)"
+        } else if !primary.isEmpty {
+            name = primary
+        } else if let brand, !brand.isEmpty {
+            name = brand
+        } else {
+            return nil
+        }
+
+        let household = trimmedText(food["householdServingFullText"])
+        let servingDescription = (household?.isEmpty == false) ? household : "\(formatAmount(serving)) \(unit)"
+        let barcode = ((food["gtinUpc"] as? String) ?? "").filter(\.isNumber)
+
+        return USDABrandedServing(
+            name: name,
+            brand: brand,
+            perServing: MacroTotals(
+                calories: calories,
+                proteinG: scaled.proteinG,
+                carbsG: scaled.carbsG,
+                fatG: scaled.fatG
+            ),
+            servingDescription: servingDescription,
+            barcode: barcode.isEmpty ? nil : barcode,
+            servingGrams: isMass ? serving : nil
+        )
+    }
+
+    private static func trimmedText(_ value: Any?) -> String? {
+        (value as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func postFoodSearch(query: String, dataTypes: [String], pageSize: Int) async -> [[String: Any]]? {
+        let key = apiKey
+        guard var components = URLComponents(string: searchURL) else { return nil }
+        components.queryItems = [URLQueryItem(name: "api_key", value: key)]
+        guard let url = components.url else { return nil }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 8
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("FunFitnessTrainer/1.0 (iOS; macro tracker)", forHTTPHeaderField: "User-Agent")
+        let body: [String: Any] = [
+            "query": query,
+            "dataType": dataTypes,
+            "pageSize": pageSize,
+        ]
+        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        guard !rateLimitIsActive() else { return nil }
+        guard
+            let (data, response) = try? await URLSession.shared.data(for: request),
+            let http = response as? HTTPURLResponse
+        else { return nil }
+        if recordRateLimit(http) { return nil }
+        guard
+            (200...299).contains(http.statusCode),
+            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return nil }
+        return json["foods"] as? [[String: Any]]
+    }
+
+    private static func parse(_ food: [String: Any], barcode: String) -> BarcodeProductResult? {
+        let nutrients = food["foodNutrients"] as? [[String: Any]] ?? []
+        func amount(_ ids: Set<Int>, names: [String], energy: Bool = false) -> Double {
+            for nutrient in nutrients {
+                let id = (nutrient["nutrientId"] as? Int)
+                    ?? (nutrient["nutrientNumber"] as? String).flatMap(Int.init)
+                let name = (nutrient["nutrientName"] as? String ?? "").lowercased()
+                let matchesID = id.map { ids.contains($0) } ?? false
+                let matchesName = names.contains { name.contains($0) }
+                guard matchesID || matchesName else { continue }
+                if energy, name.contains("from") { continue }
+                if !matchesID, name.contains("saturated") || name.contains("trans") { continue }
+                guard var value = doubleValue(nutrient["value"]) ?? doubleValue(nutrient["amount"]) else { continue }
+                let unit = (nutrient["unitName"] as? String ?? "").lowercased()
+                if energy, unit.contains("kj") { value /= 4.184 }
+                return value
+            }
+            return 0
+        }
+
+        let calories = MacroTrackingEngine.normalizedEnergy(
+            reportedCalories: amount([1008], names: ["energy"], energy: true),
+            proteinG: amount([1003], names: ["protein"]),
+            carbsG: amount([1005], names: ["carbohydrate"]),
+            fatG: amount([1004], names: ["total lipid", "fat"])
+        )
+        guard calories > 0 else { return nil }
+        let description = (food["description"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let brand = ((food["brandOwner"] as? String) ?? (food["brandName"] as? String))?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let household = (food["householdServingFullText"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let serving = household?.isEmpty == false ? household : nil
+        let name: String
+        if let brand, !brand.isEmpty, !description.isEmpty, !description.lowercased().contains(brand.lowercased()) {
+            name = "\(brand), \(description)"
+        } else if !description.isEmpty {
+            name = description
+        } else if let brand, !brand.isEmpty {
+            name = brand
+        } else {
+            name = "Packaged food"
+        }
+
+        return BarcodeProductResult(
+            barcode: barcode,
+            name: name,
+            brand: brand,
+            servingDescription: serving,
+            imageURL: nil,
+            perServing: MacroTotals(
+                calories: calories,
+                proteinG: amount([1003], names: ["protein"]),
+                carbsG: amount([1005], names: ["carbohydrate"]),
+                fatG: amount([1004], names: ["total lipid", "fat"])
+            ),
+            servingQuantityMl: nil
+        )
+    }
+}
+
+enum OpenFoodFactsBarcode {
+    static func variants(_ digits: String) -> [String] {
+        var values = [digits]
+        if digits.count == 12 { values.append("0" + digits) }
+        if digits.count == 13, digits.hasPrefix("0") { values.append(String(digits.dropFirst())) }
+        if digits.count == 14, digits.hasPrefix("0") { values.append(String(digits.dropFirst())) }
+        return values
+    }
+
+    static func sameProduct(_ lhs: String, _ rhs: String) -> Bool {
+        let left = lhs.drop { $0 == "0" }
+        let right = rhs.drop { $0 == "0" }
+        return !left.isEmpty && left == right
     }
 }

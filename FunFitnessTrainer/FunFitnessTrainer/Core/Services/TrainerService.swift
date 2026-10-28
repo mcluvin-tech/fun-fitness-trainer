@@ -668,6 +668,20 @@ enum TrainerService {
         "Logged \(FoodItemNaming.stripDashes(exercise.name)). About \(Int(exercise.caloriesBurned)) calories burned. That's on the record. It doesn't add extra food to today's target."
     }
 
+    /// A spoken or typed plate should hit Today immediately, even if the reply is still thinking.
+    static func commitsFoodLog(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        let lower = trimmed.lowercased()
+        if lower.contains("?") { return false }
+        if FoodLogCorrection.looksLikeCorrection(trimmed) { return false }
+        if looksLikeHypotheticalFood(lower) || looksLikeMealSuggestion(lower) || looksLikeFoodMacroQuery(lower) {
+            return false
+        }
+        if looksLikeConfirmedFoodLog(lower) || looksLikeCurrentFoodConsumption(lower) { return true }
+        return FoodAnalysisService.estimateOffline(from: trimmed).entriesForLogging().count >= 2
+    }
+
     private static func looksLikeConfirmedFoodLog(_ text: String) -> Bool {
         let triggers = [
             "i also had ", "i also ate ", "i also drank ", "also had ", "also ate ", "also drank ",

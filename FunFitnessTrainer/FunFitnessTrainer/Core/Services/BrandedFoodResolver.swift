@@ -189,6 +189,7 @@ enum BrandedFoodResolver {
         "a", "an", "the", "of", "with", "and", "plus", "i", "had", "my", "some", "for", "to", "on",
         "it", "was", "bowl", "cup", "slice", "serving", "size", "can", "tin", "oz", "ounce", "gram", "grams", "ml",
         "about", "just", "only", "fl", "fluid", "large", "small", "medium", "one", "two", "half",
+        "third", "thirds", "quarter", "quarters", "portion",
         "grilled", "baked", "roasted", "fried", "raw", "cooked", "fresh", "organic", "plain",
         "leftover", "homemade", "steamed", "boiled", "crispy", "boneless", "skinless", "unsweetened",
     ]

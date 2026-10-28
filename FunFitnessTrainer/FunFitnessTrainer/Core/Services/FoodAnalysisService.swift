@@ -275,11 +275,52 @@ enum FoodAnalysisService {
             return FoodLookupOutcome(meal: estimateOffline(from: description), choices: [], needsConfirmation: false)
         }
 
-        var pieces: [SegmentLookup] = []
-        for segment in segments {
-            pieces.append(await resolveFoodSegment(segment))
-        }
+        let pieces = await resolveSegments(segments)
         return outcome(from: pieces)
+    }
+
+    /// One slow USDA call must not hold the rest of the plate. Each item has its own deadline.
+    static var segmentLookupTimeout: TimeInterval = 4
+
+    private static func resolveSegments(_ segments: [String]) async -> [SegmentLookup] {
+        await withTaskGroup(of: (Int, SegmentLookup).self) { group in
+            for (index, segment) in segments.enumerated() {
+                group.addTask { @Sendable in
+                    let piece = await resolveSegmentWithinTimeout(segment)
+                    return (index, piece)
+                }
+            }
+            var ordered = Array(
+                repeating: SegmentLookup(meal: MealPayload(name: "Meal", calories: 0, proteinG: 0, carbsG: 0, fatG: 0), alternatives: [], needsConfirmation: false),
+                count: segments.count
+            )
+            for await (index, piece) in group {
+                if segments.indices.contains(index) {
+                    ordered[index] = piece
+                }
+            }
+            return ordered
+        }
+    }
+
+    private static func resolveSegmentWithinTimeout(_ segment: String) async -> SegmentLookup {
+        let timeout = segmentLookupTimeout
+        let fallback = SegmentLookup(meal: estimateOffline(from: segment), alternatives: [], needsConfirmation: false)
+        return await withTaskGroup(of: SegmentLookup?.self) { group in
+            group.addTask { @Sendable () -> SegmentLookup? in
+                await resolveFoodSegment(segment)
+            }
+            group.addTask { @Sendable () -> SegmentLookup? in
+                try? await Task.sleep(nanoseconds: UInt64(max(timeout, 0.05) * 1_000_000_000))
+                return nil
+            }
+            var resolved: SegmentLookup?
+            if let next = await group.next(), let piece = next {
+                resolved = piece
+            }
+            group.cancelAll()
+            return resolved ?? fallback
+        }
     }
 
     /// A label-backed or higher-priority lookup should replace the first guess.
@@ -306,7 +347,7 @@ enum FoodAnalysisService {
             && abs(meal.fatG - 10 * scale) < 0.75
     }
 
-    private struct SegmentLookup {
+    private struct SegmentLookup: Sendable {
         var meal: MealPayload
         var alternatives: [MealPayload]
         var needsConfirmation: Bool

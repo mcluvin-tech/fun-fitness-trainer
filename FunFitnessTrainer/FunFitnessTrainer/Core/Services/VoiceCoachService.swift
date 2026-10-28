@@ -64,27 +64,43 @@ final class VoiceCoachService: NSObject, ObservableObject {
 
         let input = audioEngine.inputNode
         let format = input.outputFormat(forBus: 0)
-        input.removeTap(onBus: 0)
+        if tapInstalled {
+            input.removeTap(onBus: 0)
+            tapInstalled = false
+        }
         input.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in
             request.append(buffer)
         }
+        tapInstalled = true
 
         audioEngine.prepare()
         try audioEngine.start()
         isRecording = true
     }
 
+    private var tapInstalled = false
+
     /// Stops recording and returns the recognizer's best transcript.
     /// `formattedString` often looks like "Catalina crunch." — trailing punctuation is removed
     /// before the text is handed to Larry. Cancelling immediately used to drop that final result.
     func stopRecording() async -> String {
-        guard isRecording else {
+        let wasRecording = isRecording
+        isRecording = false
+        if audioEngine.isRunning {
+            audioEngine.stop()
+        }
+        if tapInstalled {
+            audioEngine.inputNode.removeTap(onBus: 0)
+            tapInstalled = false
+        }
+        guard wasRecording else {
+            recognitionTask?.cancel()
+            recognitionRequest = nil
+            recognitionTask = nil
+            deactivateSession()
             return FoodItemNaming.normalizedSpeechTranscript(liveTranscript)
         }
 
-        isRecording = false
-        audioEngine.stop()
-        audioEngine.inputNode.removeTap(onBus: 0)
         recognitionRequest?.endAudio()
 
         let deadline = Date().addingTimeInterval(1.2)
@@ -101,7 +117,7 @@ final class VoiceCoachService: NSObject, ObservableObject {
         recognitionTask?.cancel()
         recognitionRequest = nil
         recognitionTask = nil
-        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        deactivateSession()
 
         let captured = transcriptBox.snapshot().text
         let visible = liveTranscript
@@ -129,6 +145,10 @@ final class VoiceCoachService: NSObject, ObservableObject {
         let session = AVAudioSession.sharedInstance()
         try session.setCategory(.playAndRecord, mode: .measurement, options: [.duckOthers, .defaultToSpeaker])
         try session.setActive(true, options: .notifyOthersOnDeactivation)
+    }
+
+    private func deactivateSession() {
+        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
     }
 
 }

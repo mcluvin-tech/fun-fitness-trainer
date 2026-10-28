@@ -110,7 +110,7 @@ enum FoodQuantity {
         let lower = text.lowercased()
         let quantityText = strippingMacroClauses(lower)
         let prep = preparation(in: lower)
-        let number = leadingNumber(in: quantityText) ?? wordNumber(in: quantityText)
+        let number = fractionAmount(in: quantityText) ?? leadingNumber(in: quantityText) ?? wordNumber(in: quantityText)
 
         if let grams = parseGrams(in: quantityText) {
             return FoodPortion(amount: grams, unit: .gram, preparation: prep)
@@ -293,7 +293,42 @@ enum FoodQuantity {
         return fallback ?? 1
     }
 
+    /// "a third of a cup", "half a cup", "a quarter cup", and "1/3 cup".
+    /// Checked before a bare "a" so "a third" is not one whole cup.
+    static func fractionAmount(in text: String) -> Double? {
+        let slash = #"(\d+)\s*/\s*(\d+)"#
+        if let regex = try? NSRegularExpression(pattern: slash),
+           let match = regex.firstMatch(in: text, range: NSRange(text.startIndex..<text.endIndex, in: text)),
+           match.numberOfRanges > 2,
+           let numRange = Range(match.range(at: 1), in: text),
+           let denRange = Range(match.range(at: 2), in: text),
+           let numerator = Double(text[numRange]),
+           let denominator = Double(text[denRange]),
+           denominator > 0 {
+            return numerator / denominator
+        }
+        let phrases: [(String, Double)] = [
+            ("three quarters of a", 0.75), ("three quarters", 0.75),
+            ("two thirds of a", 2.0 / 3.0), ("two thirds", 2.0 / 3.0),
+            ("a third of a", 1.0 / 3.0), ("one third of a", 1.0 / 3.0), ("third of a", 1.0 / 3.0),
+            ("a third", 1.0 / 3.0), ("one third", 1.0 / 3.0),
+            ("a quarter of a", 0.25), ("one quarter of a", 0.25), ("quarter of a", 0.25),
+            ("a quarter", 0.25), ("one quarter", 0.25),
+            ("half a", 0.5), ("a half", 0.5), ("one half", 0.5),
+        ]
+        for (phrase, value) in phrases {
+            let pattern = "\\b\(NSRegularExpression.escapedPattern(for: phrase))\\b"
+            guard let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive),
+                  regex.firstMatch(in: text, range: NSRange(text.startIndex..<text.endIndex, in: text)) != nil else {
+                continue
+            }
+            return value
+        }
+        return nil
+    }
+
     static func wordNumber(in text: String) -> Double? {
+        if let fraction = fractionAmount(in: text) { return fraction }
         let words: [(String, Double)] = [
             ("a couple of", 2), ("a couple", 2), ("couple of", 2), ("couple", 2),
             ("two", 2), ("three", 3), ("four", 4), ("five", 5), ("six", 6),

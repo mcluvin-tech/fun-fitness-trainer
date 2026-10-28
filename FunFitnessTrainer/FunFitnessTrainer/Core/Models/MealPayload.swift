@@ -2,7 +2,7 @@ import Foundation
 import SwiftData
 
 /// One food item with its own macro estimate.
-struct MealLineItem: Codable, Equatable {
+struct MealLineItem: Codable, Equatable, Sendable {
     var name: String
     var calories: Double
     var proteinG: Double
@@ -98,7 +98,7 @@ struct MealLineItem: Codable, Equatable {
 }
 
 /// Macro estimate returned by Larry when logging food via voice or text.
-struct MealPayload: Codable, Equatable {
+struct MealPayload: Codable, Equatable, Sendable {
     var name: String
     var calories: Double
     var proteinG: Double
@@ -301,7 +301,8 @@ enum MealLogging {
         _ payload: MealPayload,
         into context: ModelContext,
         photoData: Data? = nil,
-        analysisConfidence: Double? = nil
+        analysisConfidence: Double? = nil,
+        estimating: Bool = false
     ) -> [Meal] {
         let reconciled = FoodAnalysisService.reconcileMealPayload(payload)
         var inserted: [Meal] = []
@@ -327,6 +328,14 @@ enum MealLogging {
                 nutritionSource: entry.source.rawValue,
                 nutritionConfidence: entry.confidence.rawValue
             )
+            if estimating {
+                var notes = meal.assumptions
+                if !notes.contains(Meal.estimatingMarker) {
+                    notes.append(Meal.estimatingMarker)
+                }
+                meal.assumptionsJSON = (try? JSONEncoder().encode(notes)).flatMap { String(data: $0, encoding: .utf8) }
+                meal.isEstimate = true
+            }
             context.insert(meal)
             inserted.append(meal)
             shared.append((name: name, calories: entry.calories, proteinG: entry.proteinG, loggedAt: meal.loggedAt))
@@ -359,6 +368,48 @@ enum MealLogging {
         ))
         try? context.save()
         shareToPack(meal: meal)
+    }
+
+    /// Writes resolved macros onto the rows already on Today. Does not delete a row if a lookup comes back short.
+    static func refine(ids: [UUID], with payload: MealPayload, in context: ModelContext) {
+        guard !ids.isEmpty else { return }
+        let entries = payload.entriesForLogging()
+        guard !entries.isEmpty else { return }
+        let existing = (try? context.fetch(FetchDescriptor<Meal>())) ?? []
+        let byID = Dictionary(uniqueKeysWithValues: existing.map { ($0.id, $0) })
+        let rows = ids.compactMap { byID[$0] }
+        let count = min(rows.count, entries.count)
+        for index in 0..<count {
+            let entry = entries[index]
+            rows[index].apply(MealPayload(
+                name: FoodItemNaming.canonicalName(for: entry.name),
+                calories: entry.calories,
+                proteinG: entry.proteinG,
+                carbsG: entry.carbsG,
+                fatG: entry.fatG,
+                assumptions: entry.assumptions.filter { $0 != Meal.estimatingMarker },
+                quantity: entry.quantity,
+                unit: entry.unit,
+                preparationState: entry.preparationState,
+                brand: entry.brand,
+                source: entry.source,
+                confidence: entry.confidence
+            ))
+            if var notes = rows[index].assumptionsJSON,
+               let data = notes.data(using: .utf8),
+               var decoded = try? JSONDecoder().decode([String].self, from: data) {
+                decoded.removeAll { $0 == Meal.estimatingMarker }
+                notes = (try? JSONEncoder().encode(decoded)).flatMap { String(data: $0, encoding: .utf8) } ?? notes
+                rows[index].assumptionsJSON = notes
+            }
+        }
+        if entries.count > rows.count {
+            let extra = Array(entries.dropFirst(rows.count))
+            for entry in extra {
+                _ = insertReturningMeals(entry, into: context)
+            }
+        }
+        try? context.save()
     }
 
     /// Swap a just-logged estimate for a resolved meal without adding duplicate rows.

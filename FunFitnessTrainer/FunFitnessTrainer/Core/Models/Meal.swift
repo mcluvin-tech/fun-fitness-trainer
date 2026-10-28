@@ -90,6 +90,13 @@ final class Meal {
         return isEstimate ? .genericEstimate : .database
     }
 
+    /// Set while a spoken meal is on Today and the per-item lookup is still running.
+    var isResolvingMacros: Bool {
+        assumptions.contains(Self.estimatingMarker)
+    }
+
+    static let estimatingMarker = "status:estimating"
+
     var confidenceKind: MacroTrackingEngine.NutritionConfidence {
         if let nutritionConfidence, let parsed = MacroTrackingEngine.NutritionConfidence(rawValue: nutritionConfidence) {
             return parsed

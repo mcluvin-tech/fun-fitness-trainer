@@ -47,7 +47,7 @@ enum MacroTrackingEngine {
         }
     }
 
-    enum NutritionConfidence: String, Codable {
+    enum NutritionConfidence: String, Codable, Sendable {
         case high, medium, low
 
         /// Visual estimates are never high — even a "sure" plate photo is still a guess.

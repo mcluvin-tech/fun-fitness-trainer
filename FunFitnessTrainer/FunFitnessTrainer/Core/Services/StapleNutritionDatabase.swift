@@ -1000,10 +1000,84 @@ enum StapleNutritionDatabase {
         aliases: ["broccoli"],
         name: "Broccoli",
         calories: 35, proteinG: 2.4, carbsG: 7.2, fatG: 0.4,
-        notes: "USDA cooked broccoli per 100 g. 1 cup is about 156 g.",
+        notes: "USDA cooked broccoli per 100 g. 1 cup chopped is about 156 g, about 55 kcal.",
         preparation: .cooked,
         gramsPerCup: 156,
         defaultPortion: FoodPortion(amount: 1, unit: .cup, preparation: .cooked)
+    )
+
+    static let broccoliRaw = per100g(
+        key: "broccoli_raw",
+        aliases: ["raw broccoli"],
+        name: "Raw broccoli",
+        calories: 34, proteinG: 2.8, carbsG: 6.6, fatG: 0.4,
+        notes: "USDA raw broccoli per 100 g. 1 cup chopped is about 91 g, about 31 kcal.",
+        preparation: .raw,
+        gramsPerCup: 91,
+        defaultPortion: FoodPortion(amount: 1, unit: .cup, preparation: .raw)
+    )
+
+    static let cauliflowerCooked = per100g(
+        key: "cauliflower",
+        aliases: ["cauliflower"],
+        name: "Cauliflower",
+        calories: 23, proteinG: 1.8, carbsG: 4.1, fatG: 0.5,
+        notes: "USDA cooked cauliflower per 100 g. 1 cup is about 124 g.",
+        preparation: .cooked,
+        gramsPerCup: 124,
+        defaultPortion: FoodPortion(amount: 1, unit: .cup, preparation: .cooked)
+    )
+
+    static let asparagusCooked = per100g(
+        key: "asparagus",
+        aliases: ["asparagus"],
+        name: "Asparagus",
+        calories: 22, proteinG: 2.4, carbsG: 4.1, fatG: 0.2,
+        notes: "USDA cooked asparagus per 100 g. 1 cup is about 180 g.",
+        preparation: .cooked,
+        gramsPerCup: 180,
+        defaultPortion: FoodPortion(amount: 1, unit: .cup, preparation: .cooked)
+    )
+
+    static let zucchiniCooked = per100g(
+        key: "zucchini",
+        aliases: ["zucchini", "courgette"],
+        name: "Zucchini",
+        calories: 17, proteinG: 1.1, carbsG: 3.1, fatG: 0.4,
+        notes: "USDA cooked zucchini per 100 g. 1 cup is about 180 g.",
+        preparation: .cooked,
+        gramsPerCup: 180,
+        defaultPortion: FoodPortion(amount: 1, unit: .cup, preparation: .cooked)
+    )
+
+    static let bellPepper = per100g(
+        key: "bell_pepper",
+        aliases: ["bell pepper", "bell peppers"],
+        name: "Bell pepper",
+        calories: 26, proteinG: 1, carbsG: 6, fatG: 0.3,
+        notes: "USDA raw bell pepper per 100 g. 1 cup chopped is about 149 g.",
+        gramsPerCup: 149,
+        defaultPortion: FoodPortion(amount: 1, unit: .cup, preparation: .raw)
+    )
+
+    static let kaleRaw = per100g(
+        key: "kale",
+        aliases: ["kale"],
+        name: "Kale",
+        calories: 35, proteinG: 2.9, carbsG: 4.4, fatG: 1.5,
+        notes: "USDA raw kale per 100 g. 1 cup chopped is about 21 g.",
+        gramsPerCup: 21,
+        defaultPortion: FoodPortion(amount: 1, unit: .cup, preparation: .raw)
+    )
+
+    static let cucumberRaw = per100g(
+        key: "cucumber",
+        aliases: ["cucumber", "cucumbers"],
+        name: "Cucumber",
+        calories: 15, proteinG: 0.7, carbsG: 3.6, fatG: 0.1,
+        notes: "USDA raw cucumber per 100 g. 1 cup sliced is about 104 g.",
+        gramsPerCup: 104,
+        defaultPortion: FoodPortion(amount: 1, unit: .cup, preparation: .raw)
     )
 
     static let potatoBaked = per100g(
@@ -1188,6 +1262,13 @@ enum StapleNutritionDatabase {
         spinachCooked,
         spinachRaw,
         broccoliCooked,
+        broccoliRaw,
+        cauliflowerCooked,
+        asparagusCooked,
+        zucchiniCooked,
+        bellPepper,
+        kaleRaw,
+        cucumberRaw,
         sweetPotatoBaked,
         potatoBaked,
         pastaCooked,
@@ -1369,6 +1450,12 @@ enum StapleNutritionDatabase {
         }
     }
 
+    private static func isVaguePortion(_ text: String) -> Bool {
+        text.range(of: #"\bsome\b"#, options: .regularExpression) != nil
+            || text.contains("a portion")
+            || text.contains("portion of")
+    }
+
     private static func looksLikeLiquid(_ entry: Entry) -> Bool {
         let haystack = (entry.key + " " + entry.displayName + " " + entry.aliases.joined(separator: " ")).lowercased()
         return haystack.contains("milk") || haystack.contains("juice") || haystack.contains("beer")
@@ -1436,6 +1523,16 @@ enum StapleNutritionDatabase {
         text: String
     ) -> (portion: FoodPortion, assumption: String)? {
         guard consumed.unit.isCountable else { return nil }
+
+        // "some chicken" and "a portion of chicken" are a plate serving, not a 6 oz default.
+        if entry.key.hasPrefix("chicken"), isVaguePortion(text) {
+            let plates = max(consumed.amount, 1)
+            let portion = FoodPortion(amount: 4 * plates, unit: .ounce, preparation: .cooked)
+            return (
+                portion,
+                "Some chicken is about 4 oz of cooked breast. Say a weight, such as 6 oz, for a tighter number."
+            )
+        }
 
         // "can" is not "canned". A stated weight ("5 oz") is not countable, so it never comes through here.
         if entry.key == "tuna_canned", mentionsWholeCan(text) {
@@ -1511,6 +1608,10 @@ enum StapleNutritionDatabase {
         if haystack.contains("chicken"), !haystack.contains("chipotle") {
             if portion.preparation == .raw { return chickenBreastRaw }
             return chickenBreastCooked
+        }
+        if matchesToken(haystack, "broccoli") {
+            if portion.preparation == .raw || haystack.contains("raw broccoli") { return broccoliRaw }
+            return broccoliCooked
         }
         if haystack.contains("salmon") || (matchesToken(haystack, "fish") && !haystack.contains("shellfish")) {
             return salmonCooked

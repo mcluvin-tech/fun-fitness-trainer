@@ -657,6 +657,7 @@ enum FoodItemNaming {
             #"^(?:about|around|approximately|roughly)\s+(?:a|an|one|\d+(?:\.\d+)?)(?:\s+"# + unit + #")?\s+"#,
             #"^(?:a|an|one|\d+(?:\.\d+)?)(?:\s+"# + unit + #")?\s+"#,
             #"^(?:"# + unit + #")\s+"#,
+            #"^(?:thirds?|quarters?)\s+"#,
         ]
         for pattern in patterns {
             guard let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive) else { continue }

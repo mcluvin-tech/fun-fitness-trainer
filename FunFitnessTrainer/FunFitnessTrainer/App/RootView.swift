@@ -82,29 +82,36 @@ struct MainTabView: View {
 
     var body: some View {
         ZStack(alignment: .bottom) {
-            Group {
-                switch tab {
-                case .today:
-                    DashboardView(
-                        embeddedInTabs: true,
-                        onRequestLog: { showLogFood = true },
-                        onOpenLarry: {
-                            withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
-                                tab = .larry
-                            }
-                        }
-                    )
-                case .log:
-                    FoodLogView()
-                case .larry:
-                    CoachChatView(showsCloseButton: false) {
+            ZStack {
+                DashboardView(
+                    embeddedInTabs: true,
+                    onRequestLog: { showLogFood = true },
+                    onOpenLarry: {
                         withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
-                            tab = .today
+                            tab = .larry
                         }
                     }
-                case .progress:
+                )
+                .opacity(tab == .today ? 1 : 0)
+                .allowsHitTesting(tab == .today)
+                .accessibilityHidden(tab != .today)
+
+                CoachChatView(showsCloseButton: false, isActive: tab == .larry) {
+                    withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
+                        tab = .today
+                    }
+                }
+                .opacity(tab == .larry ? 1 : 0)
+                .allowsHitTesting(tab == .larry)
+                .accessibilityHidden(tab != .larry)
+
+                if tab == .log {
+                    FoodLogView()
+                }
+                if tab == .progress {
                     MenuView(showsDismissButton: false, title: "Progress")
-                case .settings:
+                }
+                if tab == .settings {
                     NavigationStack {
                         SettingsView()
                             .safeAreaInset(edge: .bottom) {
@@ -114,6 +121,7 @@ struct MainTabView: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .animation(.spring(response: 0.35, dampingFraction: 0.85), value: tab)
 
             if appState.larryReaction == nil {
                 FloatingHomeTabBar(selection: $tab)

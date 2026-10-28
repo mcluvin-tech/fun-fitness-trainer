@@ -1062,7 +1062,14 @@ struct MealRowView: View {
                         .font(.caption2.weight(.semibold))
                         .foregroundStyle(BrandTheme.homeTertiaryText)
 
-                    if needsReview {
+                    if meal.isResolvingMacros {
+                        Text("Estimating…")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(BrandTheme.teal)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(BrandTheme.teal.opacity(0.16), in: Capsule())
+                    } else if needsReview {
                         Button {
                             onReviewEstimate?()
                         } label: {

@@ -835,6 +835,97 @@ final class PhotoMacroPipelineTests: XCTestCase {
         XCTAssertEqual(meal.carbsG, 18, accuracy: 0.1)
     }
 
+    func testSpokenPlateOfBroccoliChickenAndRiceLogsThreeItems() async throws {
+        let utterance = "I had a cup of broccoli, some chicken, and a third cup of rice"
+        let third = FoodQuantity.parse(from: "a third cup of rice")
+        XCTAssertEqual(third.unit, .cup)
+        XCTAssertEqual(third.amount, 1.0 / 3.0, accuracy: 0.02)
+        XCTAssertEqual(FoodQuantity.parse(from: "a third of a cup of rice").amount, 1.0 / 3.0, accuracy: 0.02)
+        XCTAssertEqual(FoodQuantity.parse(from: "half a cup of rice").amount, 0.5, accuracy: 0.02)
+        XCTAssertEqual(FoodQuantity.parse(from: "a quarter cup of rice").amount, 0.25, accuracy: 0.02)
+
+        let previousTimeout = FoodAnalysisService.segmentLookupTimeout
+        defer {
+            USDAFoodDataService.genericLookupForTests = nil
+            FoodAnalysisService.segmentLookupTimeout = previousTimeout
+        }
+
+        USDAFoodDataService.genericLookupForTests = { @Sendable _ in nil }
+        let failed = await FoodAnalysisService.resolveMealForLogging(from: utterance)
+        assertSpokenPlate(failed)
+
+        USDAFoodDataService.genericLookupForTests = { @Sendable query in
+            let lower = query.lowercased()
+            if lower.contains("broccoli") {
+                return USDAGenericFood(
+                    name: "Broccoli, cooked",
+                    dataType: "SR Legacy",
+                    per100g: MacroTotals(calories: 35, proteinG: 2.4, carbsG: 7.2, fatG: 0.4),
+                    grams: 156, quantity: 1, unit: "cup", portionLabel: "1 cup", assumedPortion: false
+                )
+            }
+            if lower.contains("chicken") {
+                return USDAGenericFood(
+                    name: "Chicken, broilers or fryers, breast, meat only, cooked",
+                    dataType: "SR Legacy",
+                    per100g: MacroTotals(calories: 165, proteinG: 31, carbsG: 0, fatG: 3.6),
+                    grams: 113, quantity: 4, unit: "oz", portionLabel: "4 oz", assumedPortion: false
+                )
+            }
+            if lower.contains("rice") {
+                return USDAGenericFood(
+                    name: "Rice, white, cooked",
+                    dataType: "SR Legacy",
+                    per100g: MacroTotals(calories: 130, proteinG: 2.7, carbsG: 28, fatG: 0.3),
+                    grams: 52, quantity: 1.0 / 3.0, unit: "cup", portionLabel: "1/3 cup", assumedPortion: false
+                )
+            }
+            return nil
+        }
+        let succeeded = await FoodAnalysisService.resolveMealForLogging(from: utterance)
+        assertSpokenPlate(succeeded)
+        XCTAssertEqual(succeeded.source, .usda)
+
+        FoodAnalysisService.segmentLookupTimeout = 0.2
+        USDAFoodDataService.genericLookupForTests = { @Sendable query in
+            if query.lowercased().contains("chicken") {
+                try? await Task.sleep(nanoseconds: 3_000_000_000)
+            }
+            return nil
+        }
+        let hung = await FoodAnalysisService.resolveMealForLogging(from: utterance)
+        assertSpokenPlate(hung)
+
+        let context = try inMemoryContext()
+        let saved = MealLogging.insertReturningMeals(failed, into: context, estimating: true)
+        XCTAssertEqual(saved.count, 3)
+        XCTAssertTrue(saved.allSatisfy(\.isResolvingMacros))
+        MealLogging.refine(ids: saved.map(\.id), with: hung, in: context)
+        let rows = fetchMeals(context)
+        XCTAssertEqual(rows.count, 3, "A slow lookup must not delete the plate")
+        XCTAssertFalse(rows.contains(where: \.isResolvingMacros))
+    }
+
+    private func assertSpokenPlate(
+        _ meal: MealPayload,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        let items = meal.entriesForLogging()
+        XCTAssertEqual(items.count, 3, "Got \(items.map(\.name))", file: file, line: line)
+        func item(_ needle: String) -> MealPayload? {
+            items.first { $0.name.lowercased().contains(needle) }
+        }
+        let broccoli = item("broccoli")
+        XCTAssertEqual(broccoli?.calories ?? -1, 55, accuracy: 15, "1 cup cooked broccoli is about 55 kcal", file: file, line: line)
+        let chicken = item("chicken")
+        XCTAssertEqual(chicken?.calories ?? -1, 187, accuracy: 30, "some chicken is about 4 oz cooked breast", file: file, line: line)
+        XCTAssertGreaterThan(chicken?.proteinG ?? 0, 25, file: file, line: line)
+        let rice = item("rice")
+        XCTAssertEqual(rice?.calories ?? -1, 68, accuracy: 16, "1/3 cup cooked rice is about 68 kcal", file: file, line: line)
+        XCTAssertFalse(FoodAnalysisService.isUnidentifiedPlaceholder(meal), file: file, line: line)
+    }
+
     private func inMemoryContext() throws -> ModelContext {
         let schema = Schema([Meal.self, ExerciseLog.self, DailyGoal.self, TrainerPhrase.self, UserSettings.self])
         let container = try ModelContainer(

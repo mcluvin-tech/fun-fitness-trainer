@@ -32,6 +32,8 @@ struct CoachChatView: View {
 
     /// When embedded in the floating tab bar, hide the close control and leave room for the dock.
     var showsCloseButton: Bool = true
+    /// False while another tab is showing. The chat stays mounted so a log in flight is not thrown away.
+    var isActive: Bool = true
     var onReturnHome: (() -> Void)? = nil
 
     @StateObject private var voice = VoiceCoachService()
@@ -59,6 +61,9 @@ struct CoachChatView: View {
     @State private var foodChoices: [FoodLookupChoice] = []
     @State private var foodChoicePrompt = ""
     @State private var mealsAwaitingFoodChoice: [Meal] = []
+    @State private var optimisticMealIDs: [UUID] = []
+    @State private var skipNextSuggestedMealInsert = false
+    @State private var logToast: String?
 
     private var todayMeals: [Meal] {
         DaySummaryService.mealsToday(from: allMeals)
@@ -214,7 +219,22 @@ struct CoachChatView: View {
                     Color.clear.frame(height: 88)
                 }
             }
+            if let logToast {
+                VStack {
+                    Spacer()
+                    Text(logToast)
+                        .font(.subheadline.weight(.bold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 10)
+                        .background(BrandTheme.teal.opacity(0.95), in: Capsule())
+                        .padding(.bottom, showsCloseButton ? 28 : 110)
+                }
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+                .allowsHitTesting(false)
+            }
         }
+        .animation(.spring(response: 0.35, dampingFraction: 0.82), value: logToast)
         .background {
             GeometryReader { geo in
                 Color.clear
@@ -224,6 +244,15 @@ struct CoachChatView: View {
             }
         }
         .preferredColorScheme(.dark)
+        .onChange(of: isActive) { _, active in
+            guard !active, voice.isRecording else { return }
+            Task {
+                _ = await voice.stopRecording()
+                if phase == .listening {
+                    phase = .idle
+                }
+            }
+        }
         .task {
             restoreTodayChat()
             await healthKit.bootstrapIfConnected()
@@ -781,6 +810,30 @@ struct CoachChatView: View {
         mealsAwaitingFoodChoice = []
         messages.append(ChatBubble(text: trimmed, isUser: true))
         persistChat()
+        if TrainerService.commitsFoodLog(trimmed) {
+            let estimate = FoodAnalysisService.estimateOffline(from: trimmed)
+            let ids = MealLogging.insertReturningMeals(estimate, into: context, estimating: true).map(\.id)
+            if !ids.isEmpty {
+                optimisticMealIDs = ids
+                skipNextSuggestedMealInsert = true
+                HomeHaptics.success()
+                withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                    logToast = "Logged to Today"
+                }
+                Task {
+                    try? await Task.sleep(nanoseconds: 1_600_000_000)
+                    if logToast == "Logged to Today" {
+                        withAnimation(.easeOut(duration: 0.2)) { logToast = nil }
+                    }
+                }
+                let utterance = trimmed
+                Task { @MainActor in
+                    let outcome = await FoodAnalysisService.resolveFoodLog(from: utterance)
+                    let background = ModelContext(PersistenceController.shared.container)
+                    MealLogging.refine(ids: ids, with: outcome.meal, in: background)
+                }
+            }
+        }
         withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) {
             phase = .thinking
         }
@@ -919,14 +972,19 @@ struct CoachChatView: View {
 
     private func applySuggestedMeal(_ payload: MealPayload?) {
         if applyQuantityCorrectionFromLatestUserMessage() { return }
+        let alreadyOnToday = skipNextSuggestedMealInsert
+        skipNextSuggestedMealInsert = false
         guard let payload else { return }
-        let inserted = MealLogging.insertReturningMeals(payload, into: context)
-        if let snapshot = LarryReactionSnapshot.capturing(loggedMeals: inserted, in: context) {
+        let inserted = alreadyOnToday
+            ? []
+            : MealLogging.insertReturningMeals(payload, into: context)
+        if !inserted.isEmpty, let snapshot = LarryReactionSnapshot.capturing(loggedMeals: inserted, in: context) {
             appState.presentLarryReaction(snapshot, afterSheetDismiss: false)
         }
-        guard !inserted.isEmpty else { return }
+        guard alreadyOnToday || !inserted.isEmpty else { return }
 
         let source = latestFoodLogDescription() ?? payload.name
+        let optimisticIDs = optimisticMealIDs
         Task {
             let outcome = await TrainerService.resolveLoggedFood(from: source)
             // #region agent log
@@ -947,13 +1005,19 @@ struct CoachChatView: View {
             // #endregion
             await MainActor.run {
                 if outcome.needsConfirmation, !outcome.choices.isEmpty {
-                    for meal in inserted {
-                        context.delete(meal)
-                    }
-                    try? context.save()
-                    mealsAwaitingFoodChoice = []
+                    // Keep the rows already on Today. Asking which product must not erase the log.
+                    mealsAwaitingFoodChoice = inserted
                     foodChoices = outcome.choices
                     foodChoicePrompt = "Which one should I log?"
+                    return
+                }
+                if alreadyOnToday {
+                    foodChoices = outcome.choices
+                    foodChoicePrompt = outcome.choices.isEmpty ? "" : "Not that one?"
+                    if !optimisticIDs.isEmpty {
+                        let background = ModelContext(PersistenceController.shared.container)
+                        MealLogging.refine(ids: optimisticIDs, with: outcome.meal, in: background)
+                    }
                     return
                 }
                 guard FoodAnalysisService.lookupShouldReplace(original: payload, resolved: outcome.meal) else {
@@ -970,7 +1034,11 @@ struct CoachChatView: View {
     }
 
     private func pickFoodChoice(_ choice: FoodLookupChoice) {
-        if mealsAwaitingFoodChoice.isEmpty {
+        if !optimisticMealIDs.isEmpty {
+            let background = ModelContext(PersistenceController.shared.container)
+            MealLogging.refine(ids: optimisticMealIDs, with: choice.meal, in: background)
+            optimisticMealIDs = []
+        } else if mealsAwaitingFoodChoice.isEmpty {
             _ = MealLogging.insertReturningMeals(choice.meal, into: context)
         } else {
             _ = MealLogging.replace(meals: mealsAwaitingFoodChoice, with: choice.meal, in: context)

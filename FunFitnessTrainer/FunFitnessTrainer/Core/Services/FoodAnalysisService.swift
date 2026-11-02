@@ -267,6 +267,13 @@ enum FoodAnalysisService {
             return FoodLookupOutcome(meal: estimateOffline(from: description), choices: [], needsConfirmation: false)
         }
 
+        if MacroTrackingEngine.parseUserMacros(from: query).hasAny {
+            let stated = estimateOffline(from: query)
+            if stated.entriesForLogging().count <= 1 {
+                return FoodLookupOutcome(meal: stated, choices: [], needsConfirmation: false)
+            }
+        }
+
         let source = FoodItemNaming.extractFoodReference(from: query)
             ?? FoodItemNaming.loggedFoodDescription(from: query)
             ?? FoodItemNaming.foodListForEstimation(from: query)
@@ -929,7 +936,7 @@ enum FoodAnalysisService {
             ?? FoodItemNaming.loggedFoodDescription(from: description)
             ?? FoodItemNaming.foodListForEstimation(from: description)
         let segments = foodSegments(from: source)
-        let lineItems = segments.map { estimateSegment($0) }
+        let lineItems = mergedFoodItems(segments.map { estimateSegment($0) })
 
         if lineItems.count > 1 {
             let totals = MacroTrackingEngine.recipeTotals(lineItems.map {
@@ -1002,6 +1009,7 @@ enum FoodAnalysisService {
             item.proteinG = macros.1
             item.carbsG = macros.2
             item.fatG = macros.3
+            if let fiber = stated.fiberG { item.fiberG = fiber }
             item.source = MacroTrackingEngine.NutritionSource.userProvided.rawValue
             item.confidence = MacroTrackingEngine.NutritionConfidence.high.rawValue
             copy.lineItems = [item]
@@ -1009,12 +1017,28 @@ enum FoodAnalysisService {
             copy.proteinG = item.proteinG
             copy.carbsG = item.carbsG
             copy.fatG = item.fatG
+            copy.fiberG = item.fiberG
         } else {
             let macros = overlay(copy.calories, proteinG: copy.proteinG, carbsG: copy.carbsG, fatG: copy.fatG)
             copy.calories = macros.0
             copy.proteinG = macros.1
             copy.carbsG = macros.2
             copy.fatG = macros.3
+            if let fiber = stated.fiberG { copy.fiberG = fiber }
+        }
+        if stated.hasGramMacro, isUnidentifiedPlaceholder(payload) {
+            if stated.proteinG == nil { copy.proteinG = 0 }
+            if stated.carbsG == nil { copy.carbsG = 0 }
+            if stated.fatG == nil { copy.fatG = 0 }
+            if copy.lineItems.count == 1 {
+                copy.lineItems[0].proteinG = copy.proteinG
+                copy.lineItems[0].carbsG = copy.carbsG
+                copy.lineItems[0].fatG = copy.fatG
+            }
+        }
+        if let fiber = stated.fiberG, copy.fiberG == 0 { copy.fiberG = fiber }
+        if stated.fiberG != nil {
+            copy.assumptions.append("User said \(stated.fiberG ?? 0) g fiber.")
         }
         copy.source = .userProvided
         copy.confidence = .high
@@ -1052,8 +1076,9 @@ enum FoodAnalysisService {
     }
 
     /// Splits multi-food utterances joined by commas, "and", "plus", "+", or ";".
+    /// Calorie and gram clauses stay on the food in front of them. They are not extra foods.
     private static func foodSegments(from description: String) -> [String] {
-        let text = FoodItemNaming.foodListForEstimation(from: description)
+        let text = strippingNutritionList(from: FoodItemNaming.foodListForEstimation(from: description))
 
         var normalized = text
         let replacements: [(String, String)] = [
@@ -1079,10 +1104,74 @@ enum FoodAnalysisService {
                 return s.trimmingCharacters(in: .whitespacesAndNewlines)
             }
             .filter { part in
-                !part.isEmpty && !FoodItemNaming.sanitizeSegment(part).isEmpty
+                !part.isEmpty
+                    && !FoodItemNaming.sanitizeSegment(part).isEmpty
+                    && !isNutritionFragment(part)
             }
 
         return parts.isEmpty ? [text] : parts
+    }
+
+    /// "100 calories, 5 grams of protein, and 1 gram of fiber" is a fact list, not three foods.
+    private static func strippingNutritionList(from text: String) -> String {
+        var stripped = MacroTrackingEngine.spellingOutMacroNumbers(text)
+        let patterns = [
+            #"(?:please\s+)?log\s+(?:this|it|that)\b"#,
+            #"(?:for|at|with|about|around|only|just)?\s*\d+(?:\.\d+)?\s*(?:kilo)?cal(?:orie)?s?\b"#,
+            #"\d+(?:\.\d+)?\s*(?:grams?|g)\s+of\s+(?:protein|carbs?|carbohydrates?|fat|fiber|fibre|sugar)\b"#,
+            #"\d+(?:\.\d+)?\s*(?:grams?|g)\s+(?:protein|carbs?|carbohydrates?|fat|fiber|fibre|sugar)\b"#,
+            #"\d+(?:\.\d+)?\s*(?:protein|carbs?|carbohydrates?|fat|fiber|fibre|sugar)\b"#,
+        ]
+        for pattern in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive) else { continue }
+            let range = NSRange(stripped.startIndex..<stripped.endIndex, in: stripped)
+            stripped = regex.stringByReplacingMatches(in: stripped, range: range, withTemplate: " ")
+        }
+        let dangling = [
+            #"(?:\s*,\s*){2,}"#,
+            #"\s+\band\b(?=\s*(?:,|\.|$))"#,
+            #"\b(?:for|with|at|about|around)\b\s*(?=(?:,|\.|$))"#,
+            #"\s*,\s*(?=\.|$)"#,
+        ]
+        for pattern in dangling {
+            guard let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive) else { continue }
+            let range = NSRange(stripped.startIndex..<stripped.endIndex, in: stripped)
+            stripped = regex.stringByReplacingMatches(in: stripped, range: range, withTemplate: " ")
+        }
+        return stripped.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+            .trimmingCharacters(in: CharacterSet(charactersIn: " ,.;"))
+    }
+
+    /// "five grams of protein" or "hundred calories" has no food in it.
+    private static func isNutritionFragment(_ text: String) -> Bool {
+        let words = MacroTrackingEngine.spellingOutMacroNumbers(text)
+            .lowercased()
+            .split { !$0.isLetter && !$0.isNumber }
+            .map(String.init)
+            .filter { !$0.isEmpty }
+        guard !words.isEmpty else { return true }
+        let nutrition: Set<String> = [
+            "calorie", "calories", "cal", "kcal", "protein", "carb", "carbs", "carbohydrate", "carbohydrates",
+            "fat", "fiber", "fibre", "sugar", "gram", "grams", "g",
+            "hundred", "please", "log", "this", "it", "that",
+            "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+            "a", "an", "of", "for", "and", "with",
+        ]
+        return words.allSatisfy { nutrition.contains($0) || Double($0) != nil }
+    }
+
+    /// Same food said twice, or a macro fragment beside the real food, is one row.
+    private static func mergedFoodItems(_ items: [MealLineItem]) -> [MealLineItem] {
+        var kept: [MealLineItem] = []
+        for item in items {
+            if isNutritionFragment(item.name) { continue }
+            let key = FoodItemNaming.canonicalName(for: item.name).lowercased()
+            if kept.contains(where: { FoodItemNaming.canonicalName(for: $0.name).lowercased() == key }) {
+                continue
+            }
+            kept.append(item)
+        }
+        return kept.isEmpty ? items.filter { !isNutritionFragment($0.name) } : kept
     }
 
     private static func estimateSegment(_ segment: String) -> MealLineItem {

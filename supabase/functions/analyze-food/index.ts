@@ -2,7 +2,7 @@ import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { corsHeaders, jsonResponse } from "../_shared/cors.ts";
 import { chatCompletion } from "../_shared/openai.ts";
 
-const PROMPT_VERSION = 7;
+const PROMPT_VERSION = 8;
 
 const SYSTEM = `You are looking at a photo of food. Identify what is on the plate and estimate portions. You are NOT the nutrition database — the app will calculate calories and macros from your line items.
 
@@ -48,6 +48,7 @@ If ANY nutrition label, calories line, kcal, or Supplement Facts is visible:
 If there is no readable label (a plate, bowl, restaurant dish, homemade food):
 - Set label_detected=false.
 - One line_items row per distinct visible food, with quantity and unit.
+- A nutrition-facts panel (calories, protein, fiber, carbs, fat, sugar) belongs to the food it describes. Those lines are not extra foods. Repeated calorie numbers are still one item. Copy printed numbers verbatim.
 - calories, protein_g, carbs_g, and fat_g on a line item are the TOTAL for that row's quantity. Do not copy the whole-meal total onto every row.
 - Meat and fish: estimate ounces or grams; set preparation to cooked or raw when it matters.
 - Rice, grains, yogurt: estimate cups.

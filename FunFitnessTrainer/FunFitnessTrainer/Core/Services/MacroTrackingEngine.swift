@@ -203,15 +203,47 @@ enum MacroTrackingEngine {
         var proteinG: Double?
         var carbsG: Double?
         var fatG: Double?
+        var fiberG: Double?
+        var sugarG: Double?
 
         var hasAny: Bool {
-            calories != nil || proteinG != nil || carbsG != nil || fatG != nil
+            calories != nil || proteinG != nil || carbsG != nil || fatG != nil || fiberG != nil || sugarG != nil
+        }
+
+        /// The user listed grams, not only a calorie total.
+        var hasGramMacro: Bool {
+            proteinG != nil || carbsG != nil || fatG != nil || fiberG != nil || sugarG != nil
         }
     }
 
-    /// "ice for 5 calories", "20g protein", "~90 cal".
+    /// "a hundred calories" and "five grams of protein" become digits before the capture.
+    /// "a protein bite" is left alone — "a" only counts when it is a number in front of a unit.
+    static func spellingOutMacroNumbers(_ text: String) -> String {
+        var result = text.lowercased()
+        let phrases: [(String, String)] = [
+            ("a hundred", "100"), ("one hundred", "100"), ("two hundred", "200"),
+            ("hundred", "100"),
+            ("twenty", "20"), ("thirty", "30"), ("forty", "40"), ("fifty", "50"),
+            ("sixty", "60"), ("seventy", "70"), ("eighty", "80"), ("ninety", "90"),
+            ("fifteen", "15"), ("twelve", "12"), ("eleven", "11"), ("ten", "10"),
+            ("nine", "9"), ("eight", "8"), ("seven", "7"), ("six", "6"), ("five", "5"),
+            ("four", "4"), ("three", "3"), ("two", "2"), ("one", "1"), ("zero", "0"),
+            ("a", "1"), ("an", "1"),
+        ]
+        let unit = #"(?=\s+(?:kilo)?cal(?:orie)?s?\b|\s+kcals?\b|\s+grams?\b|\s+g\b)"#
+        for (word, digits) in phrases {
+            let pattern = "\\b\(NSRegularExpression.escapedPattern(for: word))\\b\(unit)"
+            guard let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive) else { continue }
+            let range = NSRange(result.startIndex..<result.endIndex, in: result)
+            result = regex.stringByReplacingMatches(in: result, range: range, withTemplate: digits)
+        }
+        return result
+    }
+
+    /// "ice for 5 calories", "a hundred calories", "five grams of protein", "1 gram of fiber".
+    /// The first mention of each nutrient wins, so "a hundred calories … hundred calories" stays 100.
     static func parseUserMacros(from text: String) -> UserMacros {
-        let lower = text.lowercased()
+        let lower = spellingOutMacroNumbers(text)
         var result = UserMacros()
         result.calories = firstCapture(
             in: lower,
@@ -228,6 +260,14 @@ enum MacroTrackingEngine {
         result.fatG = firstCapture(
             in: lower,
             pattern: #"(\d+(?:\.\d+)?)\s*(?:g(?:rams?)?\s*(?:of\s+)?)?fat\b"#
+        )
+        result.fiberG = firstCapture(
+            in: lower,
+            pattern: #"(\d+(?:\.\d+)?)\s*(?:g(?:rams?)?\s*(?:of\s+)?)?(?:fiber|fibre)\b"#
+        )
+        result.sugarG = firstCapture(
+            in: lower,
+            pattern: #"(\d+(?:\.\d+)?)\s*(?:g(?:rams?)?\s*(?:of\s+)?)?sugar\b"#
         )
         return result
     }

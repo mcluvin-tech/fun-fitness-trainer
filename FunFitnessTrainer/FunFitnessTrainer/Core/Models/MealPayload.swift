@@ -8,6 +8,8 @@ struct MealLineItem: Codable, Equatable, Sendable {
     var proteinG: Double
     var carbsG: Double
     var fatG: Double
+    /// Grams of fiber when the user or a label stated it. Not a separate food.
+    var fiberG: Double = 0
     var quantity: Double?
     var unit: String?
     var preparationState: String?
@@ -22,6 +24,7 @@ struct MealLineItem: Codable, Equatable, Sendable {
         case proteinG = "protein_g"
         case carbsG = "carbs_g"
         case fatG = "fat_g"
+        case fiberG = "fiber_g"
         case preparationState = "preparation_state"
         case preparation
         case visionConfidence = "vision_confidence"
@@ -39,13 +42,15 @@ struct MealLineItem: Codable, Equatable, Sendable {
         brand: String? = nil,
         source: String? = nil,
         confidence: String? = nil,
-        visionConfidence: Double? = nil
+        visionConfidence: Double? = nil,
+        fiberG: Double = 0
     ) {
         self.name = name
         self.calories = calories
         self.proteinG = proteinG
         self.carbsG = carbsG
         self.fatG = fatG
+        self.fiberG = fiberG
         self.quantity = quantity
         self.unit = unit
         self.preparationState = preparationState
@@ -62,6 +67,7 @@ struct MealLineItem: Codable, Equatable, Sendable {
         proteinG = FlexibleJSONNumber.double(c, .proteinG)
         carbsG = FlexibleJSONNumber.double(c, .carbsG)
         fatG = FlexibleJSONNumber.double(c, .fatG)
+        fiberG = FlexibleJSONNumber.optionalDouble(c, .fiberG) ?? 0
         quantity = FlexibleJSONNumber.optionalDouble(c, .quantity)
         unit = try c.decodeIfPresent(String.self, forKey: .unit)
         preparationState = try c.decodeIfPresent(String.self, forKey: .preparationState)
@@ -87,6 +93,7 @@ struct MealLineItem: Codable, Equatable, Sendable {
         try c.encode(proteinG, forKey: .proteinG)
         try c.encode(carbsG, forKey: .carbsG)
         try c.encode(fatG, forKey: .fatG)
+        if fiberG > 0 { try c.encode(fiberG, forKey: .fiberG) }
         try c.encodeIfPresent(quantity, forKey: .quantity)
         try c.encodeIfPresent(unit, forKey: .unit)
         try c.encodeIfPresent(preparationState, forKey: .preparationState)
@@ -104,6 +111,8 @@ struct MealPayload: Codable, Equatable, Sendable {
     var proteinG: Double
     var carbsG: Double
     var fatG: Double
+    /// Grams of fiber the user stated. Zero when they did not mention fiber.
+    var fiberG: Double
     /// Legacy string labels from the API (used to split one combined meal).
     var items: [String]
     /// Preferred: one entry per food with per-item macros.
@@ -124,6 +133,7 @@ struct MealPayload: Codable, Equatable, Sendable {
         case proteinG = "protein_g"
         case carbsG = "carbs_g"
         case fatG = "fat_g"
+        case fiberG = "fiber_g"
         case lineItems = "line_items"
         case preparationState = "preparation_state"
     }
@@ -134,6 +144,7 @@ struct MealPayload: Codable, Equatable, Sendable {
         proteinG: Double,
         carbsG: Double,
         fatG: Double,
+        fiberG: Double = 0,
         items: [String] = [],
         lineItems: [MealLineItem] = [],
         barcode: String? = nil,
@@ -151,6 +162,7 @@ struct MealPayload: Codable, Equatable, Sendable {
         self.proteinG = proteinG
         self.carbsG = carbsG
         self.fatG = fatG
+        self.fiberG = fiberG
         self.items = items
         self.lineItems = lineItems
         self.barcode = barcode
@@ -171,6 +183,7 @@ struct MealPayload: Codable, Equatable, Sendable {
         proteinG = FlexibleJSONNumber.double(c, .proteinG)
         carbsG = FlexibleJSONNumber.double(c, .carbsG)
         fatG = FlexibleJSONNumber.double(c, .fatG)
+        fiberG = FlexibleJSONNumber.optionalDouble(c, .fiberG) ?? 0
         items = try c.decodeIfPresent([String].self, forKey: .items) ?? []
         lineItems = try c.decodeIfPresent([MealLineItem].self, forKey: .lineItems) ?? []
         barcode = nil
@@ -201,6 +214,7 @@ struct MealPayload: Codable, Equatable, Sendable {
         try c.encode(proteinG, forKey: .proteinG)
         try c.encode(carbsG, forKey: .carbsG)
         try c.encode(fatG, forKey: .fatG)
+        if fiberG > 0 { try c.encode(fiberG, forKey: .fiberG) }
         try c.encode(items, forKey: .items)
         try c.encode(lineItems, forKey: .lineItems)
         try c.encode(quantity, forKey: .quantity)
@@ -224,6 +238,7 @@ struct MealPayload: Codable, Equatable, Sendable {
                     proteinG: clean.proteinG,
                     carbsG: clean.carbsG,
                     fatG: clean.fatG,
+                    fiberG: clean.fiberG,
                     barcode: barcode,
                     isLabelBacked: isLabelBacked,
                     assumptions: assumptions,
@@ -261,6 +276,7 @@ struct MealPayload: Codable, Equatable, Sendable {
             proteinG: proteinG,
             carbsG: carbsG,
             fatG: fatG,
+            fiberG: fiberG,
             barcode: barcode,
             isLabelBacked: isLabelBacked,
             assumptions: assumptions,

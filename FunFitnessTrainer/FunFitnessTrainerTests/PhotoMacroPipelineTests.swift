@@ -835,6 +835,27 @@ final class PhotoMacroPipelineTests: XCTestCase {
         XCTAssertEqual(meal.carbsG, 18, accuracy: 0.1)
     }
 
+    func testSpokenProteinBiteWithStatedMacrosLogsOneItem() async {
+        let utterance = "I just had a protein bite for a hundred calories, five grams of protein, one gram of fiber, hundred calories. Please log this."
+        let meal = await FoodAnalysisService.resolveMealForLogging(from: utterance)
+        let items = meal.entriesForLogging()
+        XCTAssertEqual(items.count, 1, "Got \(items.map(\.name))")
+        XCTAssertTrue(items[0].name.lowercased().contains("protein bite"))
+        XCTAssertEqual(items[0].calories, 100, accuracy: 0.1)
+        XCTAssertEqual(items[0].proteinG, 5, accuracy: 0.1)
+        XCTAssertEqual(items[0].fiberG, 1, accuracy: 0.1)
+        XCTAssertEqual(items[0].source, .userProvided)
+        XCTAssertEqual(meal.calories, 100, accuracy: 0.1)
+
+        let quest = await FoodAnalysisService.resolveMealForLogging(from: "a Quest bar, 190 calories, 21 grams protein")
+        let questItems = quest.entriesForLogging()
+        XCTAssertEqual(questItems.count, 1, "Got \(questItems.map(\.name))")
+        XCTAssertTrue(questItems[0].name.lowercased().contains("quest"))
+        XCTAssertEqual(questItems[0].calories, 190, accuracy: 0.1)
+        XCTAssertEqual(questItems[0].proteinG, 21, accuracy: 0.1)
+        XCTAssertEqual(questItems[0].source, .userProvided)
+    }
+
     func testSpokenPlateOfBroccoliChickenAndRiceLogsThreeItems() async throws {
         let utterance = "I had a cup of broccoli, some chicken, and a third cup of rice"
         let third = FoodQuantity.parse(from: "a third cup of rice")

@@ -39,6 +39,8 @@
 		M4C1R2O3T4R5A6C7K8E9N0G1 /* Core/Services/MacroTrackingEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = M4C1R2O3T4R5A6C7K8E9N0G2 /* Core/Services/MacroTrackingEngine.swift */; };
 		F0O1D2Q3U4A5N6T7I8T9Y0A1 /* Core/Services/FoodQuantity.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0O1D2Q3U4A5N6T7I8T9Y0B1 /* Core/Services/FoodQuantity.swift */; };
 		F00D1T3M4N5A6M7E8B9U0I1L2 /* Core/Services/FoodItemNaming.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00D1T3M4N5A6M7E8B9U0I1L3 /* Core/Services/FoodItemNaming.swift */; };
+		F00D1C0N4M4P7E8R9B0U1L2 /* Core/Services/FoodIconMapper.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00D1C0N4M4P7E8R9B0U1L3 /* Core/Services/FoodIconMapper.swift */; };
+		L4R5Y6F7R8I9D0A1Y2R3B4 /* Core/Services/LarryFridayReminder.swift in Sources */ = {isa = PBXBuildFile; fileRef = L4R5Y6F7R8I9D0A1Y2R3F4 /* Core/Services/LarryFridayReminder.swift */; };
 		S7A8P9L0E1N2U3T4R5I6T7A8 /* Core/Services/StapleNutritionDatabase.swift in Sources */ = {isa = PBXBuildFile; fileRef = S7A8P9L0E1N2U3T4R5I6T7B9 /* Core/Services/StapleNutritionDatabase.swift */; };
 		E1X2E3R4C5I6S7E8L9O0G1B2 /* Core/Models/ExerciseLog.swift in Sources */ = {isa = PBXBuildFile; fileRef = E1X2E3R4C5I6S7E8L9O0G1F3 /* Core/Models/ExerciseLog.swift */; };
 		E1X2E3R4C5I6S7E8S9E0R1B2 /* Core/Services/ExerciseEstimateService.swift in Sources */ = {isa = PBXBuildFile; fileRef = E1X2E3R4C5I6S7E8S9E0R1F3 /* Core/Services/ExerciseEstimateService.swift */; };
@@ -115,6 +117,8 @@
 		M4C1R2O3T4R5A6C7K8E9N0G2 /* Core/Services/MacroTrackingEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Core/Services/MacroTrackingEngine.swift; sourceTree = "<group>"; };
 		F0O1D2Q3U4A5N6T7I8T9Y0B1 /* Core/Services/FoodQuantity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Core/Services/FoodQuantity.swift; sourceTree = "<group>"; };
 		F00D1T3M4N5A6M7E8B9U0I1L3 /* Core/Services/FoodItemNaming.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Core/Services/FoodItemNaming.swift; sourceTree = "<group>"; };
+		F00D1C0N4M4P7E8R9B0U1L3 /* Core/Services/FoodIconMapper.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Core/Services/FoodIconMapper.swift; sourceTree = "<group>"; };
+		L4R5Y6F7R8I9D0A1Y2R3F4 /* Core/Services/LarryFridayReminder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Core/Services/LarryFridayReminder.swift; sourceTree = "<group>"; };
 		S7A8P9L0E1N2U3T4R5I6T7B9 /* Core/Services/StapleNutritionDatabase.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Core/Services/StapleNutritionDatabase.swift; sourceTree = "<group>"; };
 		E1X2E3R4C5I6S7E8L9O0G1F3 /* Core/Models/ExerciseLog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Core/Models/ExerciseLog.swift; sourceTree = "<group>"; };
 		E1X2E3R4C5I6S7E8S9E0R1F3 /* Core/Services/ExerciseEstimateService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Core/Services/ExerciseEstimateService.swift; sourceTree = "<group>"; };
@@ -219,6 +223,8 @@
 				F0O1D2P3H4O5T6O7L8O9C0B1 /* Core/Services/FoodPhotoLocalAnalysis.swift */,
 				O0P3E0N1F2O3O4D5F6A7C8T0 /* Core/Services/OpenFoodFactsService.swift */,
 				F00D1T3M4N5A6M7E8B9U0I1L3 /* Core/Services/FoodItemNaming.swift */,
+				F00D1C0N4M4P7E8R9B0U1L3 /* Core/Services/FoodIconMapper.swift */,
+				L4R5Y6F7R8I9D0A1Y2R3F4 /* Core/Services/LarryFridayReminder.swift */,
 				S7A8P9L0E1N2U3T4R5I6T7B9 /* Core/Services/StapleNutritionDatabase.swift */,
 				E1X2E3R4C5I6S7E8S9E0R1F3 /* Core/Services/ExerciseEstimateService.swift */,
 				296F4D2F83524FE899089025 /* Core/Services/TrainerService.swift */,
@@ -416,6 +422,8 @@
 				F0O1D2P3H4O5T6O7L8O9C0A1 /* Core/Services/FoodPhotoLocalAnalysis.swift in Sources */,
 				O0P3E0N1F2O3O4D5F6A7C8T9 /* Core/Services/OpenFoodFactsService.swift in Sources */,
 				F00D1T3M4N5A6M7E8B9U0I1L2 /* Core/Services/FoodItemNaming.swift in Sources */,
+				F00D1C0N4M4P7E8R9B0U1L2 /* Core/Services/FoodIconMapper.swift in Sources */,
+				L4R5Y6F7R8I9D0A1Y2R3B4 /* Core/Services/LarryFridayReminder.swift in Sources */,
 				S7A8P9L0E1N2U3T4R5I6T7A8 /* Core/Services/StapleNutritionDatabase.swift in Sources */,
 				E1X2E3R4C5I6S7E8L9O0G1B2 /* Core/Models/ExerciseLog.swift in Sources */,
 				E1X2E3R4C5I6S7E8S9E0R1B2 /* Core/Services/ExerciseEstimateService.swift in Sources */,

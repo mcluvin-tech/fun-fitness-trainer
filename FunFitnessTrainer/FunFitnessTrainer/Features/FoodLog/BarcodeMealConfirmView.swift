@@ -181,6 +181,7 @@ struct BarcodeMealConfirmView: View {
             carbsG: macros.carbsG,
             fatG: macros.fatG,
             barcode: product.barcode,
+            imageURL: product.imageURL?.absoluteString,
             isLabelBacked: true,
             assumptions: product.servingDescription.map { ["Serving: \($0)"] } ?? [],
             quantity: servings,

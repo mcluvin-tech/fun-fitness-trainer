@@ -293,3 +293,83 @@ final class VoiceTurnMachineTests: XCTestCase {
         XCTAssertEqual(machine.phase, .listening)
     }
 }
+
+final class FoodIconMapperTests: XCTestCase {
+    func testKnownFoodsGetTheirOwnIcons() {
+        XCTAssertEqual(FoodIconMapper.badge(for: "Raw Honey").category, .honey)
+        XCTAssertEqual(FoodIconMapper.badge(for: "Raw Honey").emoji, "🍯")
+        XCTAssertEqual(FoodIconMapper.badge(for: "broccoli").category, .vegetable)
+        XCTAssertEqual(FoodIconMapper.badge(for: "chicken breast").category, .chicken)
+        XCTAssertEqual(FoodIconMapper.badge(for: "Protein Bite").category, .protein)
+        XCTAssertEqual(FoodIconMapper.badge(for: "Quest bar").category, .protein)
+    }
+
+    func testUnknownFoodUsesThePlate() {
+        let badge = FoodIconMapper.badge(for: "mystery goo")
+        XCTAssertEqual(badge.category, .plate)
+        XCTAssertEqual(badge.emoji, "🍽️")
+    }
+
+    func testOldLogRowDecodesWithoutAnImageURL() throws {
+        let json = """
+        {"name":"Raw Honey","calories":64,"protein_g":0,"carbs_g":17,"fat_g":0}
+        """.data(using: .utf8)!
+        let meal = try JSONDecoder().decode(MealPayload.self, from: json)
+        XCTAssertNil(meal.imageURL)
+        XCTAssertEqual(meal.name, "Raw Honey")
+        XCTAssertEqual(meal.calories, 64, accuracy: 0.1)
+        XCTAssertEqual(meal.fiberG, 0, accuracy: 0.1)
+    }
+}
+
+final class LarryFridayReminderTests: XCTestCase {
+    func testNextFridayIs713AndLaterFridaysStayAWeekApart() {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let wednesday = calendar.date(from: DateComponents(year: 2026, month: 11, day: 4, hour: 15))!
+        let first = LarryFridayReminder.nextFriday713(from: wednesday, calendar: calendar)
+        XCTAssertGreaterThan(first, wednesday)
+        XCTAssertEqual(calendar.component(.weekday, from: first), 6)
+        XCTAssertEqual(calendar.component(.hour, from: first), 19)
+        XCTAssertEqual(calendar.component(.minute, from: first), 13)
+
+        let after = calendar.date(byAdding: .hour, value: 2, to: first)!
+        let following = LarryFridayReminder.nextFriday713(from: after, calendar: calendar)
+        XCTAssertEqual(calendar.dateComponents([.day], from: first, to: following).day, 7)
+
+        let slots = LarryFridayReminder.slots(from: wednesday, calendar: calendar, count: 8)
+        XCTAssertEqual(slots.count, 8)
+        XCTAssertEqual(Set(slots.map(\.identifier)).count, 8)
+        let again = LarryFridayReminder.slots(from: wednesday, calendar: calendar, count: 8)
+        XCTAssertEqual(slots.map(\.identifier), again.map(\.identifier))
+        XCTAssertEqual(slots[0].body, "Thinking 'bout drinking this weekend and getting bloated like a little bitch?")
+        XCTAssertEqual(slots[1].body, "Are you just gonna blow all your gains on booze this weekend? Okay, little buddy!")
+        XCTAssertTrue(slots[0].identifier.hasPrefix("larry.friday."))
+    }
+}
+
+final class LarryDrillSergeantTests: XCTestCase {
+    func testFatLardLineIsInTheRotation() {
+        XCTAssertTrue(LarryDrillSergeant.roasts.contains(
+            "Tired of being a fat lard? Abs are built in the kitchen, bitch!"
+        ))
+        XCTAssertTrue(LarryDrillSergeant.roasts.contains(
+            "Are you just gonna blow all your gains on booze this weekend? Okay, little buddy!"
+        ))
+    }
+
+    func testAPlainReplyKeepsTheCaloriesInFront() {
+        let meal = MealPayload(name: "Raw Honey", calories: 64, proteinG: 0, carbsG: 17, fatG: 0)
+        let reply = spoken(meal)
+        XCTAssertTrue(reply.contains("Raw Honey"))
+        XCTAssertTrue(reply.contains("64"))
+        XCTAssertTrue(reply.hasPrefix("Logged"))
+    }
+
+    private func spoken(_ meal: MealPayload) -> String {
+        let cal = Int(meal.calories.rounded())
+        let protein = Int(meal.proteinG.rounded())
+        let facts = "Logged it, baby. \(meal.name), about \(cal) calories and \(protein) grams of protein."
+        return facts + LarryDrillSergeant.suffix(for: meal.name, calories: meal.calories)
+    }
+}

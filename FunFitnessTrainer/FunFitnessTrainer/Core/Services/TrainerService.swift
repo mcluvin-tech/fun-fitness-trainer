@@ -986,7 +986,7 @@ enum TrainerService {
         let sourceNote = meal.isLabelBacked ? " (Open Food Facts)" : ""
         if entries.count > 1 {
             let summary = entries.map { "\($0.name), about \(MacroTrackingEngine.displayCalories($0.calories)) calories" }.joined(separator: ". ")
-            return "Logged \(entries.count) items\(sourceNote), baby. \(summary). Macros don't lie!"
+            return "Logged \(entries.count) items\(sourceNote), baby. \(summary)." + LarryDrillSergeant.suffix(for: meal.name, calories: meal.calories)
         }
         return spokenNutritionReply(for: meal, logged: true, sourceNote: sourceNote)
     }
@@ -1000,10 +1000,13 @@ enum TrainerService {
         let fat = Int(one.fatG.rounded())
         let drink = FoodItemNaming.isBeverage(one.name) || FoodItemNaming.isBeverage(meal.name)
         if logged {
+            let facts: String
             if drink {
-                return "Logged\(sourceNote). \(one.name), about \(cal) calories, \(protein) grams of protein, and \(carbs) grams of carbs. Liquid calories. That's not a protein win."
+                facts = "Logged\(sourceNote). \(one.name), about \(cal) calories, \(protein) grams of protein, and \(carbs) grams of carbs."
+            } else {
+                facts = "Logged it\(sourceNote), baby. \(one.name), about \(cal) calories and \(protein) grams of protein."
             }
-            return "Logged it\(sourceNote), baby. \(one.name), about \(cal) calories and \(protein) grams of protein. Macros don't lie!"
+            return facts + LarryDrillSergeant.suffix(for: one.name, calories: Double(cal))
         }
         return "About \(cal) calories, \(protein) grams of protein, \(carbs) grams of carbs, and \(fat) grams of fat."
     }

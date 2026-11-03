@@ -94,7 +94,7 @@ enum OpenFoodFactsService {
         components.queryItems = [
             URLQueryItem(
                 name: "fields",
-                value: "code,product_name,brands,nutriments,serving_size,serving_quantity,image_url,status"
+                value: "code,product_name,brands,nutriments,serving_size,serving_quantity,image_front_small_url,image_front_url,image_small_url,image_url,status"
             ),
         ]
 
@@ -129,7 +129,7 @@ enum OpenFoodFactsService {
             URLQueryItem(name: "page_size", value: "5"),
             URLQueryItem(
                 name: "fields",
-                value: "code,product_name,brands,nutriments,serving_size,serving_quantity,image_url"
+                value: "code,product_name,brands,nutriments,serving_size,serving_quantity,image_front_small_url,image_front_url,image_small_url,image_url"
             ),
         ]
 
@@ -202,7 +202,7 @@ enum OpenFoodFactsService {
             URLQueryItem(name: "page_size", value: "15"),
             URLQueryItem(
                 name: "fields",
-                value: "code,product_name,brands,nutriments,serving_size,serving_quantity,image_url"
+                value: "code,product_name,brands,nutriments,serving_size,serving_quantity,image_front_small_url,image_front_url,image_small_url,image_url"
             ),
         ]
         guard let url = components.url else { return [] }
@@ -246,6 +246,18 @@ enum OpenFoodFactsService {
 
     // MARK: - Parsing
 
+    /// Small front photo when Open Food Facts has one. Older payloads may only have image_url.
+    static func productImageURL(from product: [String: Any]) -> URL? {
+        let keys = ["image_front_small_url", "image_front_url", "image_small_url", "image_url"]
+        for key in keys {
+            guard let raw = (product[key] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !raw.isEmpty,
+                  let url = URL(string: raw) else { continue }
+            return url
+        }
+        return nil
+    }
+
     static func parseProduct(_ product: [String: Any], barcode: String) -> BarcodeProductResult? {
         let nutriments = product["nutriments"] as? [String: Any] ?? [:]
         let servingQuantity = resolvedServingAmount(product: product, nutriments: nutriments)
@@ -259,7 +271,7 @@ enum OpenFoodFactsService {
             .first
             .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
         let name = displayName(productName: productName, brand: brand)
-        let imageURL = (product["image_url"] as? String).flatMap(URL.init(string:))
+        let imageURL = Self.productImageURL(from: product)
         let servingDescription = (product["serving_size"] as? String)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
 

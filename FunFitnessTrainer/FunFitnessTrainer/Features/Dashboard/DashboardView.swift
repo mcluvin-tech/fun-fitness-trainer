@@ -1099,22 +1099,71 @@ struct MealRowView: View {
         }
     }
 
-    @ViewBuilder
     private var mealThumb: some View {
-        if let data = meal.photoData, let ui = UIImage(data: data) {
-            Image(uiImage: ui)
-                .resizable()
-                .scaledToFill()
-                .frame(width: 52, height: 52)
-                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-        } else {
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(BrandTheme.magenta.opacity(0.14))
-                .frame(width: 52, height: 52)
-                .overlay {
-                    Image(systemName: meal.barcode != nil ? "barcode" : "fork.knife")
-                        .foregroundStyle(BrandTheme.magenta.opacity(0.85))
+        FoodLogBadge(
+            name: displayName,
+            photoData: meal.photoData,
+            imageURL: meal.productImageURL.flatMap(URL.init(string:))
+        )
+    }
+}
+
+/// Same badge on every log row: photo, barcode product image, or a cartoon emoji.
+struct FoodLogBadge: View {
+    var name: String
+    var photoData: Data? = nil
+    var imageURL: URL? = nil
+    var side: CGFloat = 38
+
+    var body: some View {
+        Group {
+            if let photoData, let ui = UIImage(data: photoData) {
+                Image(uiImage: ui)
+                    .resizable()
+                    .scaledToFill()
+            } else if let imageURL {
+                AsyncImage(url: imageURL) { phase in
+                    switch phase {
+                    case .success(let image):
+                        image.resizable().scaledToFill()
+                    default:
+                        FoodEmojiBadge(name: name, side: side)
+                    }
                 }
+            } else {
+                FoodEmojiBadge(name: name, side: side)
+            }
+        }
+        .frame(width: side, height: side)
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .accessibilityHidden(true)
+    }
+}
+
+struct FoodEmojiBadge: View {
+    var name: String
+    var side: CGFloat = 38
+
+    private var badge: FoodIconBadge { FoodIconMapper.badge(for: name) }
+
+    var body: some View {
+        Text(badge.emoji)
+            .font(.system(size: side * 0.5))
+            .frame(width: side, height: side)
+            .background(Self.tint(badge.category).opacity(0.22), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+
+    private static func tint(_ category: FoodIconCategory) -> Color {
+        switch category {
+        case .honey, .banana, .bread, .oats, .pasta: return Color(red: 0.95, green: 0.72, blue: 0.28)
+        case .vegetable, .salad: return Color(red: 0.35, green: 0.78, blue: 0.42)
+        case .chicken, .burger, .snack: return Color(red: 0.95, green: 0.55, blue: 0.28)
+        case .rice, .egg, .milk: return Color(red: 0.93, green: 0.9, blue: 0.78)
+        case .apple, .pizza, .steak, .dessert: return Color(red: 0.92, green: 0.35, blue: 0.38)
+        case .coffee: return Color(red: 0.62, green: 0.42, blue: 0.28)
+        case .protein: return Color(red: 0.62, green: 0.45, blue: 0.95)
+        case .fish, .drink, .smoothie: return Color(red: 0.35, green: 0.72, blue: 0.9)
+        case .plate: return Color(red: 0.55, green: 0.55, blue: 0.62)
         }
     }
 }

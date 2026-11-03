@@ -49,6 +49,8 @@ enum LarryQuoteBank {
                 "That one hurt the day.",
                 "We're off the plan. Own it and adjust.",
                 "I felt that in my headband.",
+                LarryDrillSergeant.fatLardLine,
+                "You logging that like I won't notice? I noticed.",
             ]
         case .disaster:
             return [
@@ -58,6 +60,8 @@ enum LarryQuoteBank {
                 "The macros just left the chat.",
                 "Brother. The budget is on fire.",
                 "That's not a snack. That's a sequel.",
+                LarryDrillSergeant.fatLardLine,
+                "Are you just gonna blow all your gains on booze this weekend? Okay, little buddy!",
             ]
         }
     }
@@ -96,6 +100,47 @@ struct LarryQuotePicker {
             recent[category] = used + [choice]
         }
         return choice
+    }
+}
+
+/// Grumpy closers. About one reply in three, and after junk or a heavy plate.
+/// The numbers stay in the sentence in front of these. These only roast the meal.
+enum LarryDrillSergeant {
+    static let fatLardLine = "Tired of being a fat lard? Abs are built in the kitchen, bitch!"
+
+    static let roasts = [
+        fatLardLine,
+        "Are you just gonna blow all your gains on booze this weekend? Okay, little buddy!",
+        "You logging that like I won't notice? I noticed. Abs are built in the kitchen.",
+        "That plate is a cry for help. Count it and move.",
+        "Hungry is not an emergency. Put the snack down.",
+        "You want the mirror to change? Stop feeding the problem.",
+    ]
+
+    static func shouldRoast(junkOrHeavy: Bool, seed: Int) -> Bool {
+        junkOrHeavy || seed % 3 == 0
+    }
+
+    static func roast(seed: Int) -> String {
+        let index = abs(seed) % roasts.count
+        return roasts[index]
+    }
+
+    static func seed(for name: String) -> Int {
+        name.lowercased().unicodeScalars.reduce(0) { $0 + Int($1.value) }
+    }
+
+    /// Appended after the calorie sentence. Empty when this reply stays straight.
+    static func suffix(for name: String, calories: Double) -> String {
+        let lower = name.lowercased()
+        let junk = ["pizza", "burger", "fries", "donut", "doughnut", "cake", "candy", "cookie", "ice cream", "soda", "chips", "beer", "wine", "twinkie"]
+            .contains { lower.contains($0) }
+        let heavy = calories >= 600
+        let seed = seed(for: name)
+        guard shouldRoast(junkOrHeavy: junk || heavy, seed: seed) else {
+            return " Macros don't lie!"
+        }
+        return " " + roast(seed: seed)
     }
 }
 

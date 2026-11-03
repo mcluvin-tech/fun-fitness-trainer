@@ -1,10 +1,15 @@
 import SwiftUI
 import SwiftData
+import UserNotifications
 
 @main
 struct FunFitnessTrainerApp: App {
     @StateObject private var appState = AppState()
     @Environment(\.scenePhase) private var scenePhase
+
+    init() {
+        UNUserNotificationCenter.current().delegate = LarryNotificationDelegate.shared
+    }
 
     var body: some Scene {
         WindowGroup {
@@ -23,12 +28,25 @@ struct FunFitnessTrainerApp: App {
                 .task {
                     if appState.hasCompletedOnboarding {
                         TrackingCycleService.ensureStarted()
+                        await LarryFridayReminder.requestPermissionIfNeeded()
+                        #if DEBUG
+                        if ProcessInfo.processInfo.arguments.contains("-larryFridayPreview") {
+                            LarryFridayReminder.schedulePreview(in: 10)
+                        }
+                        #endif
                     }
                     await HealthKitService.shared.bootstrapIfConnected()
                 }
+                .onChange(of: appState.hasCompletedOnboarding) { _, done in
+                    guard done else { return }
+                    Task { await LarryFridayReminder.requestPermissionIfNeeded() }
+                }
                 .onChange(of: scenePhase) { _, phase in
                     if phase == .active {
-                        Task { await HealthKitService.shared.refreshToday() }
+                        Task {
+                            await HealthKitService.shared.refreshToday()
+                            await LarryFridayReminder.refreshScheduleIfAllowed()
+                        }
                     }
                 }
         }

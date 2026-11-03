@@ -16,6 +16,8 @@ final class Meal {
     var confidence: Double?
     var isEstimate: Bool
     var barcode: String?
+    /// Product photo from a barcode lookup. Nil on older rows and on foods that were typed or spoken.
+    var productImageURL: String?
     var quantity: Double?
     var unit: String?
     var preparationState: String?
@@ -37,6 +39,7 @@ final class Meal {
         confidence: Double? = nil,
         isEstimate: Bool = false,
         barcode: String? = nil,
+        productImageURL: String? = nil,
         quantity: Double = 1,
         unit: String = "serving",
         preparationState: String? = nil,
@@ -57,6 +60,7 @@ final class Meal {
         self.confidence = confidence
         self.isEstimate = isEstimate
         self.barcode = barcode
+        self.productImageURL = productImageURL
         self.quantity = quantity
         self.unit = unit
         self.preparationState = preparationState
@@ -111,6 +115,9 @@ final class Meal {
         carbsG = payload.carbsG
         fatG = payload.fatG
         barcode = payload.barcode ?? barcode
+        if let imageURL = payload.imageURL, !imageURL.isEmpty {
+            productImageURL = imageURL
+        }
         quantity = payload.quantity
         unit = payload.unit
         preparationState = payload.preparationState

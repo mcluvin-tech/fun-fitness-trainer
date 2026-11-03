@@ -145,6 +145,11 @@ struct MainTabView: View {
             }
             appState.presentIncomingChallengeIfNeeded()
         }
+        .onReceive(NotificationCenter.default.publisher(for: .openLarryFromReminder)) { _ in
+            withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
+                tab = .larry
+            }
+        }
         .onChange(of: appState.openLarryChatOnNextAppear) { _, open in
             if open {
                 appState.openLarryChatOnNextAppear = false

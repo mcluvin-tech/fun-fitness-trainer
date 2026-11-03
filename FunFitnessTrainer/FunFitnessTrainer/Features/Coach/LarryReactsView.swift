@@ -272,24 +272,8 @@ struct LarryReactsView: View {
         )
     }
 
-    @ViewBuilder
     private var mealThumb: some View {
-        if let data = snapshot.photoData, let image = UIImage(data: data) {
-            Image(uiImage: image)
-                .resizable()
-                .scaledToFill()
-                .frame(width: 64, height: 64)
-                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-        } else {
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .fill(BrandTheme.purple.opacity(0.28))
-                .frame(width: 64, height: 64)
-                .overlay {
-                    Image(systemName: "fork.knife")
-                        .font(.title3.weight(.bold))
-                        .foregroundStyle(BrandTheme.teal)
-                }
-        }
+        FoodLogBadge(name: snapshot.mealName, photoData: snapshot.photoData, side: 40)
     }
 
     private func deltaChip(_ text: String, color: Color) -> some View {

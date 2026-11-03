@@ -119,6 +119,8 @@ struct MealPayload: Codable, Equatable, Sendable {
     var lineItems: [MealLineItem]
     /// Set when macros come from Open Food Facts (barcode or name search).
     var barcode: String?
+    /// Barcode product photo. Missing on logs saved before this field existed.
+    var imageURL: String?
     var isLabelBacked: Bool
     var assumptions: [String]
     var quantity: Double
@@ -135,6 +137,7 @@ struct MealPayload: Codable, Equatable, Sendable {
         case fatG = "fat_g"
         case fiberG = "fiber_g"
         case lineItems = "line_items"
+        case imageURL = "image_url"
         case preparationState = "preparation_state"
     }
 
@@ -148,6 +151,7 @@ struct MealPayload: Codable, Equatable, Sendable {
         items: [String] = [],
         lineItems: [MealLineItem] = [],
         barcode: String? = nil,
+        imageURL: String? = nil,
         isLabelBacked: Bool = false,
         assumptions: [String] = [],
         quantity: Double = 1,
@@ -166,6 +170,7 @@ struct MealPayload: Codable, Equatable, Sendable {
         self.items = items
         self.lineItems = lineItems
         self.barcode = barcode
+        self.imageURL = imageURL
         self.isLabelBacked = isLabelBacked
         self.assumptions = assumptions
         self.quantity = quantity
@@ -187,6 +192,7 @@ struct MealPayload: Codable, Equatable, Sendable {
         items = try c.decodeIfPresent([String].self, forKey: .items) ?? []
         lineItems = try c.decodeIfPresent([MealLineItem].self, forKey: .lineItems) ?? []
         barcode = nil
+        imageURL = try c.decodeIfPresent(String.self, forKey: .imageURL)
         isLabelBacked = false
         assumptions = []
         quantity = FlexibleJSONNumber.optionalDouble(c, .quantity) ?? 1
@@ -217,6 +223,7 @@ struct MealPayload: Codable, Equatable, Sendable {
         if fiberG > 0 { try c.encode(fiberG, forKey: .fiberG) }
         try c.encode(items, forKey: .items)
         try c.encode(lineItems, forKey: .lineItems)
+        try c.encodeIfPresent(imageURL, forKey: .imageURL)
         try c.encode(quantity, forKey: .quantity)
         try c.encode(unit, forKey: .unit)
         try c.encodeIfPresent(preparationState, forKey: .preparationState)
@@ -240,6 +247,7 @@ struct MealPayload: Codable, Equatable, Sendable {
                     fatG: clean.fatG,
                     fiberG: clean.fiberG,
                     barcode: barcode,
+                    imageURL: imageURL,
                     isLabelBacked: isLabelBacked,
                     assumptions: assumptions,
                     quantity: item.quantity ?? quantity,
@@ -278,6 +286,7 @@ struct MealPayload: Codable, Equatable, Sendable {
             fatG: fatG,
             fiberG: fiberG,
             barcode: barcode,
+            imageURL: imageURL,
             isLabelBacked: isLabelBacked,
             assumptions: assumptions,
             quantity: quantity,
@@ -337,6 +346,7 @@ enum MealLogging {
                 confidence: analysisConfidence,
                 isEstimate: entry.confidence != .high,
                 barcode: entry.barcode ?? reconciled.barcode,
+                productImageURL: entry.imageURL ?? reconciled.imageURL,
                 quantity: entry.quantity,
                 unit: entry.unit,
                 preparationState: entry.preparationState,

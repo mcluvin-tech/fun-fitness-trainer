@@ -25,3 +25,7 @@ supabase/.env.local
 
 # Supabase CLI local state
 supabase/.temp/
+
+.derivedData/
+.ux-backup-*/
+.cursor/

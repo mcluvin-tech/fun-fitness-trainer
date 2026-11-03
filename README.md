@@ -1,6 +1,6 @@
 # Fun Fitness Trainer
 
-Personality-first iOS fitness companion: silly AI morning coach, food photo macro estimates, and daily macro tracking.
+Personality-first iOS fitness companion: silly AI morning coach, food photo / barcode / nutrition-label macros, and daily tracking.
 
 ## Requirements
 

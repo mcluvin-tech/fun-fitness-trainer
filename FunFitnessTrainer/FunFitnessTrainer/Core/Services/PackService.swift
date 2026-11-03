@@ -78,8 +78,8 @@ final class PackService {
                 id: row.id,
                 memberName: row.user_id == myId ? "You" : name,
                 mealName: row.meal_name,
-                calories: Int(row.calories),
-                proteinG: Int(row.protein_g),
+                calories: MacroTrackingEngine.displayCalories(row.calories),
+                proteinG: MacroTrackingEngine.displayGrams(row.protein_g),
                 loggedAt: row.loggedAtDate,
                 isYou: row.user_id == myId
             )

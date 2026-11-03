@@ -1,0 +1,7 @@
+// Optional FoodData Central key. Leave this blank to use the public DEMO_KEY
+// (about 30 requests per hour and 50 per day, per IP).
+//
+// The app target build setting USDA_API_KEY is what Info.plist reads as $(USDA_API_KEY).
+// Set a real key there, or make this file the target's base configuration.
+// Secrets.plist can also hold USDA_API_KEY. A blank value, DEMO_KEY, or YOUR_… is ignored.
+USDA_API_KEY =

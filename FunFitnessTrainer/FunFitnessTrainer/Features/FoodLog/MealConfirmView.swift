@@ -4,6 +4,7 @@ import SwiftData
 struct MealConfirmView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.modelContext) private var context
+    @EnvironmentObject private var appState: AppState
 
     let image: UIImage
     var onSaved: (() -> Void)?
@@ -18,12 +19,17 @@ struct MealConfirmView: View {
     @State private var assumptions: [String] = []
     @State private var confidence: Double?
     @State private var labelDetected = false
+    @State private var detectedBarcode: String?
+    @State private var analysisSource: FoodAnalysisSource?
     @State private var isLoading = false
     @State private var hasAnalyzed = false
     @State private var errorMessage: String?
     @State private var showBarcode = false
+    @State private var barcodeForLookup = ""
     @State private var analysisTask: Task<Void, Never>?
     @State private var skippedAI = false
+    @State private var resolvedPayload: MealPayload?
+    @State private var displayedFromAnalysis: (calories: String, protein: String, carbs: String, fat: String)?
 
     var body: some View {
         NavigationStack {
@@ -39,13 +45,25 @@ struct MealConfirmView: View {
 
                 if isLoading {
                     Section {
-                        ProgressView("Analyzing…")
-                        Text("Slow connection? You can save the estimate below or tap Skip AI.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        Button("Skip AI") {
+                        HStack(spacing: 14) {
+                            PulsingBarcodeBars(isLocked: true)
+                                .frame(width: 72, height: 22)
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Reading the label, then estimating the rest")
+                                    .font(.subheadline.weight(.semibold))
+                                Text("You can save anytime.")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer(minLength: 0)
+                        }
+                        .padding(.vertical, 4)
+                        Button("Use current estimate") {
                             skippedAI = true
                             analysisTask?.cancel()
+                            if calories.isEmpty || protein.isEmpty {
+                                applyOfflineEstimate()
+                            }
                             isLoading = false
                         }
                         .font(.subheadline.weight(.medium))
@@ -54,8 +72,8 @@ struct MealConfirmView: View {
 
                 if let errorMessage {
                     Section {
-                        Text(errorMessage).foregroundStyle(.red)
-                        Text("Edit the values below and save — no need to wait for AI.")
+                        Text(errorMessage).foregroundStyle(.secondary)
+                        Text("You can still edit and Save — analysis is optional.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -73,7 +91,11 @@ struct MealConfirmView: View {
                     Text("Nutrition")
                 } footer: {
                     VStack(alignment: .leading, spacing: 10) {
-                        if labelDetected {
+                        if analysisSource == .barcode || detectedBarcode != nil {
+                            Label("Matched via barcode · Open Food Facts", systemImage: "barcode.viewfinder")
+                                .font(.caption)
+                                .foregroundStyle(.green)
+                        } else if labelDetected {
                             Label("Read from nutrition label", systemImage: "doc.text.magnifyingglass")
                                 .font(.caption)
                                 .foregroundStyle(.green)
@@ -84,6 +106,7 @@ struct MealConfirmView: View {
                         }
 
                         Button {
+                            barcodeForLookup = detectedBarcode ?? ""
                             showBarcode = true
                         } label: {
                             Label("Scan barcode instead", systemImage: "barcode.viewfinder")
@@ -91,13 +114,12 @@ struct MealConfirmView: View {
                         }
 
                         if hasAnalyzed && !isLoading {
-                            Button("Re-analyze with hint") {
+                            Button("Read photo again") {
                                 skippedAI = false
                                 analysisTask?.cancel()
                                 analysisTask = Task { await analyze() }
                             }
                             .font(.caption)
-                            .disabled(hint.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                         }
                     }
                 }
@@ -124,9 +146,6 @@ struct MealConfirmView: View {
                         .disabled(!canSave)
                 }
             }
-            .onAppear {
-                applyOfflineEstimate()
-            }
             .task {
                 analysisTask = Task { await analyze() }
             }
@@ -134,7 +153,7 @@ struct MealConfirmView: View {
                 analysisTask?.cancel()
             }
             .sheet(isPresented: $showBarcode) {
-                BarcodeMealConfirmView(barcode: "") {
+                BarcodeMealConfirmView(barcode: barcodeForLookup) {
                     onSaved?()
                     dismiss()
                 }
@@ -183,6 +202,18 @@ struct MealConfirmView: View {
         Double(calories) != nil && Double(protein) != nil
     }
 
+    private var photoLogSource: MacroTrackingEngine.NutritionSource {
+        if detectedBarcode != nil { return .manufacturer }
+        if labelDetected { return .userLabel }
+        return .genericEstimate
+    }
+
+    private var photoLogConfidence: MacroTrackingEngine.NutritionConfidence {
+        if detectedBarcode != nil || labelDetected { return .high }
+        if analysisSource == .cloudAI { return .low }
+        return .medium
+    }
+
     private func analyze() async {
         guard !skippedAI else { return }
         isLoading = true
@@ -199,15 +230,40 @@ struct MealConfirmView: View {
             )
             guard !Task.isCancelled, !skippedAI else { return }
             applyAnalysisResult(result)
+        } catch is CancellationError {
+            return
         } catch {
             guard !Task.isCancelled, !skippedAI else { return }
-            if calories.isEmpty || protein.isEmpty {
+            let barcodeMiss = (error as? FoodAnalysisError).flatMap { analysisError -> String? in
+                if case .barcodeNeedsLookup(let code) = analysisError { return code }
+                return nil
+            }
+            if barcodeMiss == nil, calories.isEmpty || protein.isEmpty {
                 applyOfflineEstimate()
             }
-            if let urlError = error as? URLError, urlError.code == .timedOut {
-                errorMessage = "Connection timed out. Saved values are a rough estimate — edit and save."
+            if let analysisError = error as? FoodAnalysisError {
+                switch analysisError {
+                case .labelUnreadable:
+                    errorMessage = analysisError.localizedDescription
+                    assumptions = [
+                        "Confirm macros or scan the barcode for exact nutrition.",
+                    ]
+                case .networkUnavailable:
+                    errorMessage = nil
+                    if analysisSource == .offlineEstimate || assumptions.isEmpty {
+                        assumptions = ["Confirm macros — on-device estimate."]
+                    }
+                case .barcodeNeedsLookup(let code):
+                    barcodeForLookup = code
+                    detectedBarcode = code
+                    showBarcode = true
+                    return
+                }
             } else {
-                errorMessage = error.localizedDescription
+                errorMessage = nil
+                if analysisSource == .offlineEstimate || assumptions.isEmpty {
+                    assumptions = ["Confirm macros — on-device estimate."]
+                }
             }
         }
     }
@@ -216,84 +272,118 @@ struct MealConfirmView: View {
         guard calories.isEmpty && protein.isEmpty else { return }
         let trimmedHint = hint.trimmingCharacters(in: .whitespacesAndNewlines)
         let estimate = FoodAnalysisService.offlineEstimate(from: trimmedHint.isEmpty ? nil : trimmedHint)
-        let entry = estimate.entriesForLogging().first
-        name = entry?.name ?? estimate.name
-        calories = formatMacro(entry?.calories ?? estimate.calories)
-        protein = formatMacro(entry?.proteinG ?? estimate.proteinG)
-        carbs = formatMacro(entry?.carbsG ?? estimate.carbsG)
-        fat = formatMacro(entry?.fatG ?? estimate.fatG)
-        assumptions = ["Offline estimate — confirm or wait for AI on a faster connection."]
+        applyResolvedPayload(estimate, analysisSource: .offlineEstimate, visionConfidence: nil)
+        assumptions = ["On-device estimate — confirm or wait for label/AI analysis."] + estimate.assumptions
     }
 
     private func applyAnalysisResult(_ result: FoodAnalysisResult) {
-        name = result.items.first ?? "Meal"
-        calories = formatMacro(result.calories)
-        protein = formatMacro(result.proteinG)
-        carbs = formatMacro(result.carbsG)
-        fat = formatMacro(result.fatG)
+        let resolved = FoodAnalysisService.resolvedMeal(fromPhotoAnalysis: result)
+        applyResolvedPayload(
+            resolved,
+            analysisSource: result.source,
+            visionConfidence: result.confidence
+        )
         items = result.items
-        assumptions = result.assumptions
-        confidence = result.confidence
         labelDetected = result.labelDetected ?? false
+        detectedBarcode = result.barcode
     }
 
-    private func formatMacro(_ value: Double) -> String {
-        let rounded = value.rounded()
-        if abs(value - rounded) < 0.05 {
-            return String(Int(rounded))
-        }
-        return String(format: "%.1f", value)
+    private func applyResolvedPayload(
+        _ payload: MealPayload,
+        analysisSource: FoodAnalysisSource?,
+        visionConfidence: Double?
+    ) {
+        resolvedPayload = payload
+        let totals = FoodAnalysisService.userFacingTotals(from: payload)
+        name = payload.entriesForLogging().count == 1
+            ? (payload.entriesForLogging().first?.name ?? payload.name)
+            : payload.name
+        let calorieText = FoodAnalysisService.formatEstimateForDisplay(
+            totals.calories,
+            isCalories: true,
+            confidence: payload.confidence
+        )
+        let proteinText = FoodAnalysisService.formatEstimateForDisplay(
+            totals.proteinG,
+            isCalories: false,
+            confidence: payload.confidence
+        )
+        let carbText = FoodAnalysisService.formatEstimateForDisplay(
+            totals.carbsG,
+            isCalories: false,
+            confidence: payload.confidence
+        )
+        let fatText = FoodAnalysisService.formatEstimateForDisplay(
+            totals.fatG,
+            isCalories: false,
+            confidence: payload.confidence
+        )
+        calories = calorieText
+        protein = proteinText
+        carbs = carbText
+        fat = fatText
+        assumptions = payload.assumptions
+        confidence = visionConfidence
+        self.analysisSource = analysisSource
+        displayedFromAnalysis = (calorieText, proteinText, carbText, fatText)
+    }
+
+    private var userEditedDisplayedMacros: Bool {
+        guard let displayedFromAnalysis else { return false }
+        return displayedFromAnalysis.calories != calories
+            || displayedFromAnalysis.protein != protein
+            || displayedFromAnalysis.carbs != carbs
+            || displayedFromAnalysis.fat != fat
     }
 
     private func save() {
-        guard let c = Double(calories), let p = Double(protein),
-              let cb = Double(carbs), let f = Double(fat) else { return }
+        guard let c = Double(calories), let p = Double(protein) else { return }
+        let cb = Double(carbs) ?? 0
+        let f = Double(fat) ?? 0
 
-        let payload = MealPayload(
-            name: FoodItemNaming.canonicalName(for: name),
-            calories: c,
-            proteinG: p,
-            carbsG: cb,
-            fatG: f,
-            items: items
-        )
-        let photo = image.jpegData(compressionQuality: 0.7)
-        let entries = payload.entriesForLogging()
-
-        if entries.count > 1 {
-            for entry in entries {
-                let meal = Meal(
-                    name: entry.name,
-                    calories: entry.calories,
-                    proteinG: entry.proteinG,
-                    carbsG: entry.carbsG,
-                    fatG: entry.fatG,
-                    photoData: photo,
-                    assumptions: assumptions,
-                    confidence: confidence,
-                    isEstimate: !labelDetected
-                )
-                context.insert(meal)
-                MealLogging.shareToPack(meal: meal)
-            }
-        } else {
-            let entry = entries.first
-            let meal = Meal(
-                name: entry?.name ?? FoodItemNaming.canonicalName(for: name),
+        let photo = image.jpegDataForFoodAnalysis() ?? image.jpegData(compressionQuality: 0.7)
+        let payload: MealPayload
+        if userEditedDisplayedMacros {
+            payload = MealPayload(
+                name: FoodItemNaming.canonicalName(for: name),
                 calories: c,
                 proteinG: p,
                 carbsG: cb,
                 fatG: f,
-                photoData: photo,
                 items: items,
+                barcode: detectedBarcode,
+                isLabelBacked: labelDetected || detectedBarcode != nil,
                 assumptions: assumptions,
-                confidence: confidence,
-                isEstimate: !labelDetected
+                source: .userProvided,
+                confidence: .high
             )
-            context.insert(meal)
-            MealLogging.shareToPack(meal: meal)
+        } else if let resolvedPayload {
+            payload = resolvedPayload
+        } else {
+            payload = MealPayload(
+                name: FoodItemNaming.canonicalName(for: name),
+                calories: c,
+                proteinG: p,
+                carbsG: cb,
+                fatG: f,
+                items: items,
+                barcode: detectedBarcode,
+                isLabelBacked: labelDetected || detectedBarcode != nil,
+                assumptions: assumptions,
+                source: photoLogSource,
+                confidence: photoLogConfidence
+            )
         }
-        try? context.save()
+
+        let inserted = MealLogging.insertReturningMeals(
+            payload,
+            into: context,
+            photoData: photo,
+            analysisConfidence: confidence
+        )
+        if let snapshot = LarryReactionSnapshot.capturing(loggedMeals: inserted, in: context) {
+            appState.presentLarryReaction(snapshot)
+        }
         onSaved?()
         dismiss()
     }

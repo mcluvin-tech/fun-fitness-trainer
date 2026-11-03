@@ -23,7 +23,7 @@ struct LogExerciseSheet: View {
                 Text("Log exercise")
                     .font(.title2.bold())
 
-                Text("Earn extra calories in your target — burned calories get added to today's budget.")
+                Text("Burned calories are tracked. They don't add extra food to today's target.")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)

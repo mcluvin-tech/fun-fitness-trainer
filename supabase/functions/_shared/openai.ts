@@ -9,7 +9,7 @@ export function requireOpenAI(): string {
 
 export async function chatCompletion(
   messages: { role: string; content: string | unknown[] }[],
-  options: { model?: string; json?: boolean; temperature?: number } = {},
+  options: { model?: string; json?: boolean; temperature?: number; maxTokens?: number } = {},
 ): Promise<string> {
   const apiKey = requireOpenAI();
   const body: Record<string, unknown> = {
@@ -19,6 +19,9 @@ export async function chatCompletion(
   };
   if (options.json) {
     body.response_format = { type: "json_object" };
+  }
+  if (options.maxTokens) {
+    body.max_tokens = options.maxTokens;
   }
 
   const res = await fetch("https://api.openai.com/v1/chat/completions", {

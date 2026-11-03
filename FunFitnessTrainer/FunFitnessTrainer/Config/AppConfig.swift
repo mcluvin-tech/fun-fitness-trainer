@@ -3,10 +3,50 @@ import Foundation
 enum AppConfig {
     static let bundleId = "com.lukeeidsvold.funfitnesstrainer"
     static let freeScansPerDay = 3
+
+    /// This phone build. A Release App Store build keeps the daily free-scan cap.
+    #if DEBUG
+    static let isFoundersEdition = true
+    #else
+    static let isFoundersEdition = false
+    #endif
     static let promptVersion = 3
 
     /// Must match Info.plist URL scheme and Supabase redirect allow-list.
     static let oauthCallbackScheme = "funfitnesstrainer"
+
+    /// HTTPS host for challenge invites once Associated Domains are configured.
+    /// Until this is a real host, invites use `funfitnesstrainer://challenge/{token}`.
+    static var challengeUniversalLinkHost: String? {
+        guard var host = Secrets.value(for: "CHALLENGE_LINK_HOST") else { return nil }
+        host = host
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "https://", with: "")
+            .replacingOccurrences(of: "http://", with: "")
+        host = host.split(separator: "/").first.map(String.init) ?? host
+        if host.isEmpty || host.contains(" ") { return nil }
+        return host
+    }
+
+    /// Public App Store product page. Used in challenge share text so friends
+    /// without the app get a real download link before App Store launch.
+    /// Prefer `APP_STORE_URL`, or set `APP_STORE_ID` (numeric) to build the URL.
+    static var appStoreURL: URL? {
+        if let raw = Secrets.value(for: "APP_STORE_URL")?.trimmingCharacters(in: .whitespacesAndNewlines),
+           let url = URL(string: raw),
+           let scheme = url.scheme?.lowercased(),
+           scheme == "https" || scheme == "http" {
+            return url
+        }
+        if let id = Secrets.value(for: "APP_STORE_ID")?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !id.isEmpty,
+           id.allSatisfy(\.isNumber),
+           let url = URL(string: "https://apps.apple.com/app/id\(id)") {
+            return url
+        }
+        return nil
+    }
+
     static var oauthRedirectURL: String {
         "\(oauthCallbackScheme)://auth-callback"
     }

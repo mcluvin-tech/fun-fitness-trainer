@@ -22,7 +22,7 @@ struct LogFoodSheet: View {
                 Text("Log a meal")
                     .font(.title2.bold())
 
-                Text("Snap a photo for AI estimates, scan a barcode for label data, or enter details yourself.")
+                Text("Snap a photo of food, a barcode, or a nutrition label — or enter details yourself.")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
